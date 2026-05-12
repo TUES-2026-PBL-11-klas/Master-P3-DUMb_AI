@@ -1,6 +1,6 @@
 from __future__ import annotations
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, TypeVar, runtime_checkable
+from typing import TYPE_CHECKING, ClassVar, Protocol, TypeVar, runtime_checkable
 
 if TYPE_CHECKING:
     from shared.domain import IngestionEvent
@@ -26,6 +26,10 @@ class DocumentParser(Protocol[T_co]):
     protocol reusable for future pipeline stages.
     """
 
+    extensions: ClassVar[
+        list[str]
+    ]  # Attribute listing canonical supported extensions ("txt", "md")
+
     def parse(self, path: Path) -> T_co:
         """
         Read *path* from disk and return a fully-constructed domain object.
@@ -34,14 +38,6 @@ class DocumentParser(Protocol[T_co]):
             UnsupportedFormatError: if the file extension is not handled by
             this parser (should normally be guarded by ``supports()``).
             RAGException: for any other parsing failure.
-        """
-        ...
-
-    def supports(self, ext: str) -> bool:
-        """
-        Return True when this parser can handle files with extension *ext*.
-
-        *ext* is passed without a leading dot and in lower-case ("md", "txt").
         """
         ...
 
