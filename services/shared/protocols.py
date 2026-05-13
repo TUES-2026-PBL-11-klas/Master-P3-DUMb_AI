@@ -36,7 +36,7 @@ class DocumentParser(Protocol[T_co]):
 
         Raises:
             UnsupportedFormatError: if the file extension is not handled by
-            this parser (should normally be guarded by ``supports()``).
+            this parser.
             RAGException: for any other parsing failure.
         """
         ...

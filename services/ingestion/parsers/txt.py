@@ -93,7 +93,9 @@ class TxtParser:
             id=uuid.uuid4(),
             # user_id is injected by IngestionService after authentication;
             # we use a nil UUID as a sentinel here.
-            user_id=uuid.UUID(int=0),
+            user_id=uuid.UUID(
+                int=0
+            ),  # 0 is an invalid user ID, to be replaced later in the ingestion flow
             content=content,
             filename=path.name,
             uploaded_at=datetime.now(tz=timezone.utc),
