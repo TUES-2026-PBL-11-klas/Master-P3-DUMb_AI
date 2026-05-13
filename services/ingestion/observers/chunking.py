@@ -223,7 +223,7 @@ class ChunkingObserver:
         """
         pad_count = self._chunk_size - len(token_ids)
         padded = token_ids + [self._pad_token_id] * pad_count
-        return self._enc.decode(padded)
+        return self._enc.decode(padded) #Gets decoded so that the embedding can get it
 
     # Introspection
     @property
