@@ -21,13 +21,13 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from shared.exceptions import EmbeddingError
+from services.shared.exceptions import EmbeddingError
 
 if TYPE_CHECKING:
-    from shared.client import (
+    from services.shared.client import (
         LlamaCppClient,
     )  # if the name of the client class/dir changes, the import here needs to be updated
-    from shared.domain import IngestionEvent
+    from services.shared.domain import IngestionEvent
 
 logger = logging.getLogger(__name__)
 

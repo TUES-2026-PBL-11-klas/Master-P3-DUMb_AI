@@ -18,8 +18,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Generic, TypeVar
 
-from shared.exceptions import UnsupportedFormatError
-from shared.protocols import DocumentParser
+from services.shared.exceptions import UnsupportedFormatError
+from services.shared.protocols import DocumentParser
 
 T = TypeVar("T")
 

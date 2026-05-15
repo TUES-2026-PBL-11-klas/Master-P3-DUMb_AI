@@ -1,3 +1,6 @@
+[tool.pytest.ini_options]
+pythonpath = ["."]
+
 [tool.mypy]
 mypy_path = "."
 packages = ["services"]
