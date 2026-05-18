@@ -17,8 +17,8 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from shared.domain import Document
-from shared.exceptions import RAGException
+from services.shared.domain import Document
+from services.shared.exceptions import RAGException
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +71,7 @@ class TxtParser:
             raise RAGException(f"Path is not a regular file: {path}")
 
         if path.suffix[1:].lower() not in _SUPPORTED:
-            from shared.exceptions import UnsupportedFormatError
+            from services.shared.exceptions import UnsupportedFormatError
 
             raise UnsupportedFormatError(
                 f"TxtParser does not handle '{path.suffix}' files. "
