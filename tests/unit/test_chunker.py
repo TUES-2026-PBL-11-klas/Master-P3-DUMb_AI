@@ -8,7 +8,7 @@ import pytest
 import tiktoken
 
 from ingestion.observers.chunking import ChunkingObserver
-from shared.domain import Document
+from shared.domain import Document, IngestionEvent, IngestionStatus
 from shared.exceptions import BigSentenceError
 
 _ENC = tiktoken.get_encoding("cl100k_base")
@@ -26,6 +26,10 @@ def _doc(content: str) -> Document:
         filename="test.txt",
         uploaded_at=datetime.now(timezone.utc),
     )
+
+
+def _event(content: str) -> IngestionEvent:
+    return IngestionEvent(document=_doc(content))
 
 
 # ---------------------------------------------------------------------------
@@ -105,41 +109,57 @@ def test_sentences_are_never_split_mid_way():
 
 def test_on_ingest_attaches_chunks():
     obs = ChunkingObserver(chunk_size=50)
-    doc = _doc("Hello world. This is a test.")
-    obs.on_ingest(doc)
-    assert len(doc.chunks) >= 1  # type: ignore[attr-defined]
+    event = _event("Hello world. This is a test.")
+    obs.on_ingest(event)
+    assert len(event.chunks) >= 1
+
+
+def test_on_ingest_advances_status_to_chunked():
+    obs = ChunkingObserver(chunk_size=50)
+    event = _event("Hello world. This is a test.")
+    obs.on_ingest(event)
+    assert event.status is IngestionStatus.CHUNKED
 
 
 def test_on_ingest_chunk_positions_are_sequential():
     obs = ChunkingObserver(chunk_size=50)
-    doc = _doc("Hello world. This is a test.")
-    obs.on_ingest(doc)
-    positions = [c.position for c in doc.chunks]  # type: ignore[attr-defined]
-    assert positions == list(range(len(doc.chunks)))  # type: ignore[attr-defined]
+    event = _event("Hello world. This is a test.")
+    obs.on_ingest(event)
+    positions = [c.position for c in event.chunks]
+    assert positions == list(range(len(event.chunks)))
 
 
 def test_on_ingest_chunk_doc_id_matches():
     obs = ChunkingObserver(chunk_size=50)
-    doc = _doc("Hello world. This is a test.")
-    obs.on_ingest(doc)
-    for chunk in doc.chunks:  # type: ignore[attr-defined]
-        assert chunk.doc_id == doc.id
+    event = _event("Hello world. This is a test.")
+    obs.on_ingest(event)
+    for chunk in event.chunks:
+        assert chunk.doc_id == event.document.id
 
 
 def test_on_ingest_chunk_user_id_matches():
     obs = ChunkingObserver(chunk_size=50)
-    doc = _doc("Hello world. This is a test.")
-    obs.on_ingest(doc)
-    for chunk in doc.chunks:  # type: ignore[attr-defined]
-        assert chunk.user_id == doc.user_id
+    event = _event("Hello world. This is a test.")
+    obs.on_ingest(event)
+    for chunk in event.chunks:
+        assert chunk.user_id == event.document.user_id
 
 
 def test_on_ingest_embeddings_start_empty():
     obs = ChunkingObserver(chunk_size=50)
-    doc = _doc("Hello world.")
-    obs.on_ingest(doc)
-    for chunk in doc.chunks:  # type: ignore[attr-defined]
+    event = _event("Hello world.")
+    obs.on_ingest(event)
+    for chunk in event.chunks:
         assert chunk.embedding == []
+
+
+def test_on_ingest_big_sentence_marks_event_failed():
+    obs = ChunkingObserver(chunk_size=5)
+    event = _event("This is a very long sentence that definitely exceeds five tokens.")
+    with pytest.raises(BigSentenceError):
+        obs.on_ingest(event)
+    assert event.status is IngestionStatus.FAILED
+    assert event.error_message is not None
 
 
 # ---------------------------------------------------------------------------

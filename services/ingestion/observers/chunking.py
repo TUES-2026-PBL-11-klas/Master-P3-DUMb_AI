@@ -2,12 +2,15 @@
 ChunkingObserver — IngestionObserver implementation for the RAG pipeline.
 
 Responsibilities:
-  - Split a Document's content into sentence-aligned Chunk objects whose
-    token count stays at or below a configurable budget.
-  - Attach the resulting list[Chunk] to the Document for downstream observers.
+  - Split the IngestionEvent's Document content into sentence-aligned Chunk
+    objects whose token count stays at or below a configurable budget.
+  - Attach the resulting list[Chunk] to the IngestionEvent for downstream
+    observers (embedding, storage).
+  - Advance the event status to CHUNKED on success, or mark it FAILED on error.
 
 Design:
-  - Implements the IngestionObserver protocol via structural subtyping.
+  - Implements the IngestionObserver protocol via structural subtyping:
+    on_ingest(event: IngestionEvent) -> None.
   - Uses nltk.sent_tokenize for sentence boundary detection.
   - Uses tiktoken for token counting (fast, lightweight, good BGE-M3
     approximation — see note below).
@@ -46,8 +49,8 @@ from typing import Iterator
 import nltk
 import tiktoken
 
-from shared.domain import Chunk, Document
-from shared.exceptions import BigSentenceError
+from services.shared.domain import Chunk, Document, IngestionEvent, IngestionStatus
+from services.shared.exceptions import BigSentenceError
 
 logger = logging.getLogger(__name__)
 
@@ -65,8 +68,9 @@ def _ensure_nltk_punkt() -> None:
 
 class ChunkingObserver:
     """
-    Concrete Observer — splits Document.content into sentence-aligned Chunk
-    objects, each <= _chunk_size tokens wide.
+    Concrete Observer — splits the event's Document.content into
+    sentence-aligned Chunk objects, each <= _chunk_size tokens wide, and
+    attaches them to the IngestionEvent.
 
     Satisfies shared.protocols.IngestionObserver through structural subtyping.
 
@@ -82,14 +86,26 @@ class ChunkingObserver:
         self._chunk_size = chunk_size
         self._enc = tiktoken.get_encoding(_ENCODING_NAME)
 
-    def on_ingest(self, doc: Document) -> None:
+    def on_ingest(self, event: IngestionEvent) -> None:
+        doc = event.document
         logger.info(
             "ChunkingObserver: chunking document '%s' (id=%s)",
             doc.filename,
             doc.id,
         )
-        chunks: list[Chunk] = list(self._chunk_document(doc))
-        doc.chunks = chunks  # type: ignore[attr-defined]
+        try:
+            chunks: list[Chunk] = list(self._chunk_document(doc))
+        except BigSentenceError as exc:
+            logger.error(
+                "ChunkingObserver: failed to chunk document '%s': %s",
+                doc.filename,
+                exc,
+            )
+            event.fail(str(exc))
+            raise
+
+        event.chunks = chunks
+        event.status = IngestionStatus.CHUNKED
         logger.info(
             "ChunkingObserver: produced %d chunks for document '%s'",
             len(chunks),
