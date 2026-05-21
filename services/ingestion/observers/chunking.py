@@ -129,19 +129,28 @@ class ChunkingObserver:
         """
         Pack sentences into windows whose total token count is <= _chunk_size.
 
+        Sentences are accumulated as strings and joined with a single space on
+        yield, preserving the whitespace that existed between them in the
+        source text. Token counts are tracked separately via tiktoken and are
+        never used for decode — this avoids the lossy encode→extend→decode
+        round-trip that would fuse adjacent sentences without a separator.
+
         Raises:
             BigSentenceError: if any single sentence exceeds _chunk_size tokens.
         """
         sentences: list[str] = nltk.sent_tokenize(text)
 
         if not sentences:
-            logger.warning("ChunkingObserver: received empty text — no chunks produced.")
+            logger.warning(
+                "ChunkingObserver: received empty text — no chunks produced."
+            )
             return
 
-        window: list[int] = []
+        window_texts: list[str] = []
+        window_token_count: int = 0
 
         for sentence in sentences:
-            sentence_tokens: list[int] = self._enc.encode(sentence)
+            sentence_tokens = self._enc.encode(sentence)
 
             if len(sentence_tokens) > self._chunk_size:
                 raise BigSentenceError(
@@ -149,15 +158,17 @@ class ChunkingObserver:
                     f"got {len(sentence_tokens)} tokens: {sentence[:100]!r}"
                 )
 
-            if len(window) + len(sentence_tokens) <= self._chunk_size:
-                window.extend(sentence_tokens)
+            if window_token_count + len(sentence_tokens) <= self._chunk_size:
+                window_texts.append(sentence)
+                window_token_count += len(sentence_tokens)
             else:
-                if window:
-                    yield self._enc.decode(window)
-                window = sentence_tokens
+                if window_texts:
+                    yield " ".join(window_texts)
+                window_texts = [sentence]
+                window_token_count = len(sentence_tokens)
 
-        if window:
-            yield self._enc.decode(window)
+        if window_texts:
+            yield " ".join(window_texts)
 
     @property
     def chunk_size(self) -> int:
