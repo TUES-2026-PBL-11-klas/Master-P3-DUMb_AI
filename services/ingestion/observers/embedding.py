@@ -5,6 +5,7 @@ Responsibilities:
   - Receive an IngestionEvent (which already contains chunks from ChunkingObserver).
   - Call the embedding model (BGE-M3 via the llama.cpp client) for each chunk's text.
   - Write the resulting 1024-dimensional vector into each Chunk's embedding field.
+  - Advance event.status to EMBEDDED on success, or mark it FAILED on error.
 
 This observer MUST run after ChunkingObserver and before StorageObserver
 in the observer chain, since it reads chunk text and writes embeddings
@@ -21,6 +22,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+from services.shared.domain import IngestionStatus
 from services.shared.exceptions import EmbeddingError
 
 if TYPE_CHECKING:
@@ -84,6 +86,10 @@ class EmbeddingObserver:
         The method tries embed_batch first (if the client supports it)
         for throughput, falling back to per-chunk embed calls.
 
+        On success, advances event.status to IngestionStatus.EMBEDDED.
+        On any failure, calls event.fail(...) before re-raising so that
+        downstream observers (and the document itself) see the failed state.
+
         Args:
             event: The IngestionEvent populated by ChunkingObserver.
                    event.chunks must be non-empty.
@@ -111,15 +117,26 @@ class EmbeddingObserver:
 
         texts = [chunk.text for chunk in chunks]
 
-        # Try batch embedding first, fall back to one-by-one
-        if hasattr(self._client, "embed_batch"):
-            vectors = self._embed_batch(texts)
-        else:
-            vectors = self._embed_sequential(texts)
+        try:
+            # Try batch embedding first, fall back to one-by-one
+            if hasattr(self._client, "embed_batch"):
+                vectors = self._embed_batch(texts)
+            else:
+                vectors = self._embed_sequential(texts)
+        except EmbeddingError as exc:
+            logger.error(
+                "EmbeddingObserver: failed to embed chunks for '%s': %s",
+                event.document.filename,
+                exc,
+            )
+            event.fail(str(exc))
+            raise
 
         # Write embeddings into chunks
         for chunk, vector in zip(chunks, vectors):
             chunk.embedding = vector
+
+        event.status = IngestionStatus.EMBEDDED
 
         logger.info(
             "EmbeddingObserver: successfully embedded %d chunk(s) "
