@@ -1,5 +1,9 @@
 [tool.pytest.ini_options]
-pythonpath = ["."]
+pythonpath = [".", "services"]
+testpaths = ["tests"]
+
+[tool.pyright]
+extraPaths = ["services"]
 
 [tool.mypy]
 mypy_path = "."
