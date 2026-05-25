@@ -73,6 +73,12 @@ class Chunk:
 
     The embedding is filled later by EmbeddingObserver. similarity is usually
     filled only for search results returned by the vector store.
+
+    Identity:
+        Chunks are identified by the natural composite key (doc_id, position),
+        matching the unique index in infra/mongo/init_db.js. No separate
+        surrogate UUID is carried on the dataclass — MongoDB's _id is the
+        on-disk surrogate when one is needed programmatically.
     """
 
     text: str

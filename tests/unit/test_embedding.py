@@ -48,7 +48,6 @@ def _make_event(num_chunks: int = 3) -> IngestionEvent:
     )
     chunks = [
         Chunk(
-            id=uuid.uuid4(),
             text=f"Chunk number {i} with some content.",
             doc_id=doc.id,
             user_id=doc.user_id,
