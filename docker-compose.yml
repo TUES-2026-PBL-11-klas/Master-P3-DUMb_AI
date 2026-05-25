@@ -1,0 +1,11 @@
+services:
+  mongodb-atlas-local:
+    image: mongodb/mongodb-atlas-local:latest
+    container_name: dumb-ai-mongodb-atlas-local
+    ports:
+      - "27018:27017"
+    volumes:
+      - mongodb_atlas_local_data:/data/db
+
+volumes:
+  mongodb_atlas_local_data:
