@@ -6,7 +6,6 @@ const collections = [
   "documents",
   "document_chunks",
   "queries",
-  "schema_versions",
 ];
 
 for (const collectionName of collections) {
@@ -21,21 +20,14 @@ database.documents.createIndex({ user_id: 1 });
 database.documents.createIndex({ uploaded_at: -1 });
 
 database.document_chunks.createIndex({ doc_id: 1 });
+database.document_chunks.createIndex({ user_id: 1, doc_id: 1 });
+database.document_chunks.createIndex(
+  { doc_id: 1, position: 1 },
+  { unique: true },
+);
 
 database.queries.createIndex({ user_id: 1 });
 database.queries.createIndex({ created_at: -1 });
-
-database.schema_versions.updateOne(
-  { _id: "schema" },
-  {
-    $set: {
-      version: 1,
-      updated_at: new Date(),
-      description: "Initial MongoDB document model for DUMb_AI",
-    },
-  },
-  { upsert: true },
-);
 
 const searchIndexName = "chunk_embedding_vector_index";
 const existingSearchIndexes = database.document_chunks
@@ -57,6 +49,10 @@ if (!existingSearchIndexes.includes(searchIndexName)) {
         {
           type: "filter",
           path: "doc_id",
+        },
+        {
+          type: "filter",
+          path: "user_id",
         },
       ],
     },
