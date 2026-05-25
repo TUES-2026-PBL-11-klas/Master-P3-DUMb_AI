@@ -77,6 +77,7 @@ class Chunk:
 
     text: str
     doc_id: UUID
+    user_id: UUID
     position: int
     embedding: list[float] = field(default_factory=list)
     similarity: float | None = None

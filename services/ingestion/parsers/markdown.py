@@ -137,8 +137,6 @@ class MarkdownParser:
             uploaded_at=datetime.now(tz=timezone.utc),
             content_type="text/markdown",
             status=DocumentStatus.PARSED,
-            error_message=None,
-            schema_version=1,
         )
 
     # Private helpers

@@ -101,8 +101,6 @@ class TxtParser:
             uploaded_at=datetime.now(tz=timezone.utc),
             content_type="text/plain",
             status=DocumentStatus.PARSED,
-            error_message=None,
-            schema_version=1,
         )
 
     # Private helpers
