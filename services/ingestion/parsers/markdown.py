@@ -19,6 +19,7 @@ import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import ClassVar
 
 from services.shared.domain import Document, DocumentStatus
 from services.shared.exceptions import RAGException
@@ -78,7 +79,7 @@ class MarkdownParser:
     """
 
     # Expose supported extensions for ParserRegistry introspection.
-    extensions: tuple[str, ...] = tuple(_SUPPORTED)
+    extensions: ClassVar[tuple[str, ...]] = tuple(_SUPPORTED)
 
     # DocumentParser[Document] interface
 

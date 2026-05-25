@@ -27,7 +27,7 @@ class DocumentParser(Protocol[T_co]):
     """
 
     extensions: ClassVar[
-        list[str]
+        tuple[str, ...]
     ]  # Attribute listing canonical supported extensions ("txt", "md")
 
     def parse(self, path: Path) -> T_co:

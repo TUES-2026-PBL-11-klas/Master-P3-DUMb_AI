@@ -117,6 +117,14 @@ def test_whitespace_preserved_between_packed_sentences() -> None:
     assert "world.Goodbye" not in chunks[0]
 
 
+def test_chunks_carry_token_count() -> None:
+    obs = ChunkingObserver(chunk_size=400)
+    chunks = list(obs._chunk_document(_doc("Short sentence one. Short sentence two.")))
+
+    assert all(c.token_count > 0 for c in chunks)
+    assert all(c.token_count <= 400 for c in chunks)
+
+
 # ---------------------------------------------------------------------------
 # on_ingest
 # ---------------------------------------------------------------------------

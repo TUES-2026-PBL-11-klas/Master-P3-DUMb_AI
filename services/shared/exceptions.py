@@ -8,7 +8,9 @@ to handle specific failure modes individually.
 Hierarchy:
     RAGException
     ├── UnsupportedFormatError   (parser received an unrecognised extension)
-    └── EmbeddingError           (Ollama embedding call failed)
+    ├── EmbeddingError           (embedding call failed)
+    ├── BigSentenceError         (chunker received a sentence over the token cap)
+    └── StorageError             (vector store read/write failed)
 """
 
 
@@ -29,8 +31,18 @@ class EmbeddingError(RAGException):
     Wraps the underlying network or model error as ``__cause__``.
     """
 
-    
+
 class BigSentenceError(RAGException):
     """
-    Raised when there is a sentence too large for the chunker to handle.   
+    Raised when there is a sentence too large for the chunker to handle.
+    """
+
+
+class StorageError(RAGException):
+    """
+    Raised when a vector store operation (store / search) fails.
+
+    Wraps the underlying driver error (PyMongo, network, BSON, …) as
+    ``__cause__`` so callers can introspect the root cause while still
+    catching the high-level ``RAGException``.
     """
