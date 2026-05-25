@@ -31,7 +31,6 @@ The script creates:
 - `documents`
 - `document_chunks`
 - `queries`
-- `schema_versions`
 
 It also creates the MongoDB Vector Search index:
 
@@ -57,7 +56,6 @@ Then:
 use dumb_ai
 show collections
 db.document_chunks.getSearchIndexes()
-db.schema_versions.find()
 ```
 
 The vector index should eventually show:
