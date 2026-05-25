@@ -48,7 +48,13 @@ from typing import Iterator
 import nltk
 import tiktoken
 
-from services.shared.domain import Chunk, Document, IngestionEvent, IngestionStatus
+from services.shared.domain import (
+    Chunk,
+    Document,
+    IngestionEvent,
+    IngestionStatus,
+    DocumentStatus,
+)
 from services.shared.exceptions import BigSentenceError
 
 logger = logging.getLogger(__name__)
@@ -105,6 +111,7 @@ class ChunkingObserver:
 
         event.chunks = chunks
         event.status = IngestionStatus.CHUNKED
+        event.document.mark_status(DocumentStatus.CHUNKED)
         logger.info(
             "ChunkingObserver: produced %d chunks for document '%s'",
             len(chunks),
