@@ -28,3 +28,9 @@ class EmbeddingError(RAGException):
 
     Wraps the underlying network or model error as ``__cause__``.
     """
+
+    
+class BigSentenceError(RAGException):
+    """
+    Raised when there is a sentence too large for the chunker to handle.   
+    """

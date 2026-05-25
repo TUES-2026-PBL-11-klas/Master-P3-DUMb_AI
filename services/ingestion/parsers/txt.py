@@ -57,7 +57,7 @@ class TxtParser:
 
         Returns:
             A shared.domain.Document with content set to the
-            normalised file text and source_file set to *path*.
+            normalised file text
 
         Raises:
             shared.exceptions.UnsupportedFormatError: if the file extension is not .txt
@@ -71,7 +71,7 @@ class TxtParser:
             raise RAGException(f"Path is not a regular file: {path}")
 
         if path.suffix[1:].lower() not in _SUPPORTED:
-            from shared.exceptions import UnsupportedFormatError
+            from services.shared.exceptions import UnsupportedFormatError
 
             raise UnsupportedFormatError(
                 f"TxtParser does not handle '{path.suffix}' files. "
@@ -107,7 +107,7 @@ class TxtParser:
     @staticmethod
     def _read_file(path: Path) -> str:
         """
-        Read *path* with UTF-8, fall back to latin-1 on decode errors.
+        Read *path* trying multiple encodings in order.
 
         Raises:
             shared.exceptions.RAGException: wraps any OSError (file not found, permission denied, etc.).
