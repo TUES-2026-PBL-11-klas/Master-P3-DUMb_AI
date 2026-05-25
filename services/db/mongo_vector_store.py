@@ -327,7 +327,7 @@ class MongoVectorStore(Generic[T_inv]):
             "position": chunk.position,
             "text": chunk.text,
             "embedding": list(chunk.embedding),
-            "token_count": len(chunk.text.split()),
+            "token_count": chunk.token_count,
             "metadata": dict(chunk.metadata),
             "created_at": chunk.created_at or datetime.now(timezone.utc),
             "schema_version": chunk.schema_version,
@@ -352,6 +352,7 @@ class MongoVectorStore(Generic[T_inv]):
             user_id=UUID(doc["user_id"]),
             position=int(doc["position"]),
             embedding=list(doc.get("embedding", [])),
+            token_count=int(doc.get("token_count", 0)),
             similarity=float(similarity) if similarity is not None else None,
             metadata=dict(doc.get("metadata", {})),
             created_at=doc.get("created_at"),
@@ -374,7 +375,4 @@ class MongoVectorStore(Generic[T_inv]):
             )
 
     def __repr__(self) -> str:
-        return (
-            f"MongoVectorStore(collection={self._col!r}, "
-            f"index={self._index_name!r})"
-        )
+        return f"MongoVectorStore(collection={self._col!r}, index={self._index_name!r})"

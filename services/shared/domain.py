@@ -86,6 +86,7 @@ class Chunk:
     user_id: UUID
     position: int
     embedding: list[float] = field(default_factory=list)
+    token_count: int = 0
     similarity: float | None = None
     metadata: dict[str, object] = field(default_factory=dict)
     created_at: datetime | None = None

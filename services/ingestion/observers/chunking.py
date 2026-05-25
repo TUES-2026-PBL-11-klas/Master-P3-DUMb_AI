@@ -119,6 +119,7 @@ class ChunkingObserver:
                 text=text,
                 embedding=[],
                 position=position,
+                token_count=len(self._enc.encode(text)),
             )
             for position, text in enumerate(self._chunk_text(doc.content))
         )
