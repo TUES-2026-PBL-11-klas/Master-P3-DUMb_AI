@@ -17,8 +17,8 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from shared.domain import Document
-from shared.exceptions import RAGException
+from services.shared.domain import Document, DocumentStatus
+from services.shared.exceptions import RAGException
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +99,10 @@ class TxtParser:
             content=content,
             filename=path.name,
             uploaded_at=datetime.now(tz=timezone.utc),
+            content_type="text/plain",
+            status=DocumentStatus.PARSED,
+            error_message=None,
+            schema_version=1,
         )
 
     # Private helpers

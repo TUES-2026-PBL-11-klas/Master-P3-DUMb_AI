@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, Protocol, TypeVar, runtime_checkable
 
 if TYPE_CHECKING:
-    from shared.domain import IngestionEvent
+    from services.shared.domain import IngestionEvent
 
 # Generic type variable used across the parser and store protocols.
 # T is intentionally unbound so callers can specialise it (e.g. Document, Chunk, str)
