@@ -43,7 +43,6 @@ Dependencies:
 from __future__ import annotations
 
 import logging
-import uuid
 from typing import Iterator
 
 import nltk
@@ -115,7 +114,6 @@ class ChunkingObserver:
     def _chunk_document(self, doc: Document) -> Iterator[Chunk]:
         yield from (
             Chunk(
-                id=uuid.uuid4(),
                 doc_id=doc.id,
                 user_id=doc.user_id,
                 text=text,

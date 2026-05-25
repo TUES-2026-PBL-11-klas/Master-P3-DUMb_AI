@@ -75,7 +75,6 @@ class Chunk:
     filled only for search results returned by the vector store.
     """
 
-    id: UUID
     text: str
     doc_id: UUID
     user_id: UUID
