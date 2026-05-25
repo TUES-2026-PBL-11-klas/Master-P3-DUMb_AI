@@ -16,7 +16,7 @@ Design pattern: Observer
     subtyping (no explicit inheritance needed).
     The store dependency is the VectorStore Protocol, never a concrete
     class — this is what lets the unit tests run with a MagicMock and
-    lets future backends (e.g. Qdrant, Weaviate) drop in unchanged.
+    lets future backends drop in unchanged.
 """
 
 from __future__ import annotations

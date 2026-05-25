@@ -8,6 +8,7 @@ Run with:
 from __future__ import annotations
 
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
@@ -22,7 +23,7 @@ from services.shared.exceptions import UnsupportedFormatError
 class _StubParser:
     """Minimal parser satisfying DocumentParser structurally."""
 
-    extensions = ("xyz",)
+    extensions: ClassVar[tuple[str, ...]] = ("xyz",)
 
     def parse(self, path: Path) -> str:
         return path.read_text()
@@ -31,7 +32,7 @@ class _StubParser:
 class _AlsoTxt:
     """A second parser that also claims the 'txt' extension."""
 
-    extensions = ("txt",)
+    extensions: ClassVar[tuple[str, ...]] = ("txt",)
 
     def parse(self, path: Path) -> str:
         return ""

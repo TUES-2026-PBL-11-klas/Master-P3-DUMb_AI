@@ -8,7 +8,7 @@ to handle specific failure modes individually.
 Hierarchy:
     RAGException
     ├── UnsupportedFormatError   (parser received an unrecognised extension)
-    ├── EmbeddingError           (Ollama embedding call failed)
+    ├── EmbeddingError           (embedding call failed)
     ├── BigSentenceError         (chunker received a sentence over the token cap)
     └── StorageError             (vector store read/write failed)
 """
