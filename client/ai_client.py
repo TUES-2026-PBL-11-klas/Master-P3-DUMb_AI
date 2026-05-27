@@ -106,6 +106,37 @@ class AIClient:
             raise AIClientError(f"server error: {reply.get('message', 'unknown')}")
         raise AIClientError(f"unexpected reply type: {reply.get('type')!r}")
 
+    def authenticate(self, username: str, password: str) -> bool:
+        """
+        Authenticate (or register) *username* with *password*.
+
+        Semantics mirror the server's ``auth`` handler:
+          - If the username does not exist, it is created and stored.
+          - If it does exist, the password must match the stored hash.
+
+        Returns:
+            True if the account was just created, False if an existing
+            account's password matched.
+
+        Raises:
+            AIClientError: on transport failure, malformed reply, OR on
+                           a failed auth (e.g. wrong password). Callers
+                           that want to distinguish "wrong password" from
+                           "server unreachable" should inspect the
+                           exception message — the server returns
+                           ``"incorrect password"`` verbatim.
+        """
+        reply = self._round_trip({
+            "type": "auth",
+            "username": username,
+            "password": password,
+        })
+        if reply.get("type") == "auth_ok":
+            return bool(reply.get("created", False))
+        if reply.get("type") == "error":
+            raise AIClientError(str(reply.get("message", "auth failed")))
+        raise AIClientError(f"unexpected reply type: {reply.get('type')!r}")
+
     # -- internals -----------------------------------------------------------
     def _round_trip(self, message: dict[str, Any]) -> dict[str, Any]:
         with self._lock:

@@ -190,38 +190,97 @@ def read_line(win, y, x, max_len, mask=False):
 # ── Screens ──────────────────────────────────────────────────────────────────
 
 def screen_login(stdscr):
-    stdscr.clear()
-    h, w = stdscr.getmaxyx()
-    draw_header(stdscr, "Login")
-    draw_footer(stdscr, ["Enter to confirm", "Ctrl+C to quit"])
+    """
+    Sign-in / sign-up screen.
 
-    center_text(stdscr, 2, "Welcome to DocChat",
-                curses.color_pair(C_ACCENT) | curses.A_BOLD)
-    center_text(stdscr, 3, "AI-powered document Q&A",
-                curses.color_pair(C_DIM) | curses.A_DIM)
+    Sends credentials to the backend over the socket protocol. The
+    server either:
+      - creates a new account (first time we see this username), or
+      - verifies the password against the stored hash.
 
-    bw, bh = 42, 11
-    bx = max(0, (w - bw) // 2)
-    by = max(1, (h - bh) // 2)
-    draw_box(stdscr, by, bx, bh, bw, "Sign In")
+    On wrong password we clear the box and ask again. If the server is
+    unreachable we accept the credentials locally (offline stub) so the
+    rest of the TUI is still demoable without the backend running.
+    """
+    error_msg = ""
 
-    safe_addstr(stdscr, by + 2, bx + 3, "Username:", curses.color_pair(C_ACCENT))
-    safe_addstr(stdscr, by + 5, bx + 3, "Password:", curses.color_pair(C_ACCENT))
-    safe_addstr(stdscr, by + 9, bx + 3, "(any credentials work -- stub mode)",
-                curses.color_pair(C_DIM) | curses.A_DIM)
-    stdscr.refresh()
+    while True:
+        stdscr.clear()
+        h, w = stdscr.getmaxyx()
+        draw_header(stdscr, "Login")
+        draw_footer(stdscr, ["Enter to confirm", "Ctrl+C to quit"])
 
-    username = read_line(stdscr, by + 3, bx + 3, bw - 6)
-    read_line(stdscr, by + 6, bx + 3, bw - 6, mask=True)
+        center_text(stdscr, 2, "Welcome to DocChat",
+                    curses.color_pair(C_ACCENT) | curses.A_BOLD)
+        center_text(stdscr, 3, "AI-powered document Q&A",
+                    curses.color_pair(C_DIM) | curses.A_DIM)
 
-    state["username"]  = username or "guest"
-    state["logged_in"] = True
+        bw, bh = 52, 12
+        bx = max(0, (w - bw) // 2)
+        by = max(1, (h - bh) // 2)
+        draw_box(stdscr, by, bx, bh, bw, "Sign In / Sign Up")
 
-    safe_addstr(stdscr, by + 7, bx + 3, "Logged in!",
-                curses.color_pair(C_SUCCESS) | curses.A_BOLD)
-    stdscr.refresh()
-    time.sleep(0.7)
-    state["current_screen"] = "main"
+        safe_addstr(stdscr, by + 2, bx + 3, "Username:", curses.color_pair(C_ACCENT))
+        safe_addstr(stdscr, by + 5, bx + 3, "Password:", curses.color_pair(C_ACCENT))
+
+        client = state.get("ai_client")
+        if client is None:
+            safe_addstr(stdscr, by + 9, bx + 3,
+                        "(offline -- credentials accepted locally)",
+                        curses.color_pair(C_DIM) | curses.A_DIM)
+        else:
+            safe_addstr(stdscr, by + 9, bx + 3,
+                        "(new username = sign-up; existing = sign-in)",
+                        curses.color_pair(C_DIM) | curses.A_DIM)
+
+        if error_msg:
+            safe_addstr(stdscr, by + 10, bx + 3, error_msg[:bw - 6],
+                        curses.color_pair(C_ERROR) | curses.A_BOLD)
+
+        stdscr.refresh()
+
+        username = read_line(stdscr, by + 3, bx + 3, bw - 6).strip()
+        password = read_line(stdscr, by + 6, bx + 3, bw - 6, mask=True)
+
+        if not username or not password:
+            error_msg = "Username and password are required."
+            continue
+
+        # Offline mode: keep the legacy "always succeeds" behaviour so
+        # the rest of the TUI remains demoable without a backend.
+        if client is None:
+            state["username"] = username
+            state["logged_in"] = True
+            safe_addstr(stdscr, by + 7, bx + 3, "Logged in (offline)!",
+                        curses.color_pair(C_SUCCESS) | curses.A_BOLD)
+            stdscr.refresh()
+            time.sleep(0.7)
+            state["current_screen"] = "main"
+            return
+
+        # Online: round-trip the auth message to the server.
+        try:
+            created = client.authenticate(username, password)
+        except AIClientError as exc:
+            msg = str(exc)
+            # The server returns "incorrect password" verbatim for wrong
+            # credentials; treat anything else as a transport problem
+            # and surface it without retry-pressure.
+            if "incorrect password" in msg:
+                error_msg = "Incorrect password. Try again."
+            else:
+                error_msg = f"Server error: {msg}"
+            continue
+
+        state["username"] = username
+        state["logged_in"] = True
+        msg = "Account created!" if created else "Signed in!"
+        safe_addstr(stdscr, by + 7, bx + 3, msg,
+                    curses.color_pair(C_SUCCESS) | curses.A_BOLD)
+        stdscr.refresh()
+        time.sleep(0.7)
+        state["current_screen"] = "main"
+        return
 
 
 def screen_main(stdscr):

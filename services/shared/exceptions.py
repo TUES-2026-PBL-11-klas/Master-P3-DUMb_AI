@@ -10,7 +10,8 @@ Hierarchy:
     ├── UnsupportedFormatError   (parser received an unrecognised extension)
     ├── EmbeddingError           (embedding call failed)
     ├── BigSentenceError         (chunker received a sentence over the token cap)
-    └── StorageError             (vector store read/write failed)
+    ├── StorageError             (vector store read/write failed)
+    └── AuthError                (authentication failed — wrong password, etc.)
 """
 
 
@@ -45,4 +46,15 @@ class StorageError(RAGException):
     Wraps the underlying driver error (PyMongo, network, BSON, …) as
     ``__cause__`` so callers can introspect the root cause while still
     catching the high-level ``RAGException``.
+    """
+
+
+class AuthError(RAGException):
+    """
+    Raised when an authentication attempt fails.
+
+    The message is safe to surface to the end user (e.g. "incorrect
+    password"); callers should NOT leak whether it was the username or
+    the password that was wrong if they care about user enumeration —
+    use a single message like "invalid credentials" instead.
     """
