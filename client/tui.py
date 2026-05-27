@@ -1,15 +1,34 @@
 #!/usr/bin/env python3
 """
 DocChat TUI - AI-powered document chat interface (stub/prototype)
-All backend calls are mocked: login always succeeds, uploads are tracked in-memory,
-and AI responses are placeholder stubs since no backend exists yet.
+
+Login always succeeds and uploads are tracked in-memory. AI replies are
+fetched from the dummy socket server in ``services.dummy_server`` over a
+newline-delimited JSON protocol; if the server is unreachable, the chat
+screen falls back to a local stub so the UI still works offline.
+
+Run the server in one terminal:
+    python -m services.dummy_server
+
+Then launch the TUI in another:
+    python -m client.tui
+    python -m client.tui --host 127.0.0.1 --port 5555    # custom server
+    python -m client.tui --offline                       # force local stub
 """
 
+import argparse
 import curses
 import os
+import sys
 import time
 import textwrap
 from datetime import datetime
+
+# Make ``python client/tui.py`` work as well as ``python -m client.tui``.
+if __package__ in (None, ""):
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from client.ai_client import AIClient, AIClientError
 
 # ── In-memory state ─────────────────────────────────────────────────────────
 state = {
@@ -18,21 +37,43 @@ state = {
     "documents":      [],   # {"name", "size", "uploaded_at"}
     "messages":       [],   # {"role": "user"|"ai", "text", "time"}
     "current_screen": "login",
+    "ai_client":      None, # AIClient or None when running --offline
+    "ai_status":      "offline",  # "online" | "offline" | "error: ..."
 }
 
 STUB_AI_RESPONSES = [
-    "[AI stub] Based on your documents, here is a placeholder answer.",
-    "[AI stub] The documents mention several relevant points. (Backend not connected yet.)",
-    "[AI stub] This will be answered by the real AI once the backend is ready.",
-    "[AI stub] Interesting question! The AI backend will handle this properly soon.",
+    "[offline] Based on your documents, here is a placeholder answer.",
+    "[offline] The documents mention several relevant points. (Server not connected.)",
+    "[offline] This will be answered by the real AI once the server is reachable.",
+    "[offline] Interesting question! Start the dummy server to see real replies.",
 ]
 _stub_index = 0
 
 def stub_ai_response():
+    """Local fallback used when the dummy server is unreachable."""
     global _stub_index
     r = STUB_AI_RESPONSES[_stub_index % len(STUB_AI_RESPONSES)]
     _stub_index += 1
     return r
+
+def fetch_ai_response(text):
+    """
+    Ask the dummy server for a reply, with graceful fallback.
+
+    Updates ``state["ai_status"]`` so the chat screen can show the
+    current connection state. Always returns a string -- never raises.
+    """
+    client = state.get("ai_client")
+    if client is None:
+        state["ai_status"] = "offline"
+        return stub_ai_response()
+    try:
+        answer = client.ask(text, username=state.get("username") or "anonymous")
+        state["ai_status"] = "online"
+        return answer
+    except AIClientError as exc:
+        state["ai_status"] = f"error: {exc}"
+        return f"[connection lost] {exc}  (falling back to offline stub)"
 
 # ── Color pair IDs ───────────────────────────────────────────────────────────
 C_NORMAL   = 1
@@ -322,7 +363,10 @@ def screen_chat(stdscr):
     while True:
         stdscr.clear()
         h, w = stdscr.getmaxyx()
-        draw_header(stdscr, "Chat  --  AI Document Q&A")
+        status = state.get("ai_status", "offline")
+        # Keep the header short so it fits narrow terminals.
+        status_label = status if len(status) <= 30 else status[:27] + "..."
+        draw_header(stdscr, f"Chat  --  AI Document Q&A  [{status_label}]")
         draw_footer(stdscr, ["Enter to send", "PgUp/PgDn scroll", "B to go back"])
 
         msg_area_h = h - 5
@@ -390,9 +434,17 @@ def screen_chat(stdscr):
             if text:
                 now = datetime.now().strftime("%H:%M")
                 state["messages"].append({"role": "user", "text": text, "time": now})
-                state["messages"].append({"role": "ai",   "text": stub_ai_response(), "time": now})
                 input_buf     = ""
                 scroll_offset = 0
+
+                # Show a "thinking" hint while we wait on the server.
+                safe_addstr(stdscr, h - 2, 2, "AI is thinking...",
+                            curses.color_pair(C_DIM) | curses.A_DIM)
+                stdscr.refresh()
+
+                answer = fetch_ai_response(text)
+                reply_time = datetime.now().strftime("%H:%M")
+                state["messages"].append({"role": "ai", "text": answer, "time": reply_time})
         elif ch in (ord("b"), ord("B")) and not input_buf:
             break
         elif 32 <= ch < 127:
@@ -422,5 +474,38 @@ def main(stdscr):
     time.sleep(0.6)
 
 
+def _parse_cli() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="DocChat TUI client")
+    p.add_argument("--host", default="127.0.0.1",
+                   help="dummy AI server host (default %(default)s)")
+    p.add_argument("--port", type=int, default=5555,
+                   help="dummy AI server port (default %(default)s)")
+    p.add_argument("--offline", action="store_true",
+                   help="skip the server entirely and use the local stub")
+    return p.parse_args()
+
+
+def _setup_ai_client(args: argparse.Namespace) -> None:
+    """Build the AI client and probe the server so the chat screen has accurate status."""
+    if args.offline:
+        state["ai_client"] = None
+        state["ai_status"] = "offline (--offline)"
+        return
+    client = AIClient(host=args.host, port=args.port)
+    if client.ping():
+        state["ai_client"] = client
+        state["ai_status"] = f"online ({args.host}:{args.port})"
+    else:
+        client.close()
+        state["ai_client"] = None
+        state["ai_status"] = f"unreachable ({args.host}:{args.port})"
+
+
 if __name__ == "__main__":
-    curses.wrapper(main)
+    cli_args = _parse_cli()
+    _setup_ai_client(cli_args)
+    try:
+        curses.wrapper(main)
+    finally:
+        if state["ai_client"] is not None:
+            state["ai_client"].close()
