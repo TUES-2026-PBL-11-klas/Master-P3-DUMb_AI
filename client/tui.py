@@ -2,10 +2,12 @@
 """
 DocChat TUI - AI-powered document chat interface (stub/prototype)
 
-Login always succeeds and uploads are tracked in-memory. AI replies are
-fetched from the dummy socket server in ``services.dummy_server`` over a
-newline-delimited JSON protocol; if the server is unreachable, the chat
-screen falls back to a local stub so the UI still works offline.
+Login always succeeds. Uploads read the file from local disk into bytes
+and send them to the dummy server over the persistent newline-delimited
+JSON socket (server stub validates the upload and returns an ack — no
+real ingestion yet). AI replies use the same socket; if the server is
+unreachable the chat screen falls back to a local stub so the UI still
+works offline.
 
 Run the server in one terminal:
     python -m services.dummy_server
@@ -23,22 +25,23 @@ import sys
 import time
 import textwrap
 from datetime import datetime
+from typing import Any
 
 # Make ``python client/tui.py`` work as well as ``python -m client.tui``.
 if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from client.ai_client import AIClient, AIClientError
+from client.ai_client import AIClient, AIClientError, MAX_UPLOAD_BYTES
 
-# ── In-memory state ─────────────────────────────────────────────────────────
-state = {
-    "logged_in":      False,
-    "username":       "",
-    "documents":      [],   # {"name", "size", "uploaded_at"}
-    "messages":       [],   # {"role": "user"|"ai", "text", "time"}
+# In-memory state
+state: dict[str, Any] = {
+    "logged_in": False,
+    "username": "",
+    "documents": [],  # {"name", "size", "uploaded_at"}
+    "messages": [],  # {"role": "user"|"ai", "text", "time"}
     "current_screen": "login",
-    "ai_client":      None, # AIClient or None when running --offline
-    "ai_status":      "offline",  # "online" | "offline" | "error: ..."
+    "ai_client": None,  # AIClient or None when running --offline
+    "ai_status": "offline",  # "online" | "offline" | "error: ..."
 }
 
 STUB_AI_RESPONSES = [
@@ -49,14 +52,16 @@ STUB_AI_RESPONSES = [
 ]
 _stub_index = 0
 
-def stub_ai_response():
+
+def stub_ai_response() -> str:
     """Local fallback used when the dummy server is unreachable."""
     global _stub_index
     r = STUB_AI_RESPONSES[_stub_index % len(STUB_AI_RESPONSES)]
     _stub_index += 1
     return r
 
-def fetch_ai_response(text):
+
+def fetch_ai_response(text: str) -> str:
     """
     Ask the dummy server for a reply, with graceful fallback.
 
@@ -75,24 +80,88 @@ def fetch_ai_response(text):
         state["ai_status"] = f"error: {exc}"
         return f"[connection lost] {exc}  (falling back to offline stub)"
 
-# ── Color pair IDs ───────────────────────────────────────────────────────────
-C_NORMAL   = 1
-C_HEADER   = 2
-C_ACCENT   = 3
-C_DIM      = 4
-C_ERROR    = 5
-C_SUCCESS  = 6
-C_USER_MSG = 7
-C_AI_MSG   = 8
 
-# ── Safe wrappers ────────────────────────────────────────────────────────────
-def safe_curs_set(v):
+def upload_file_to_server(path: str) -> tuple[bool, str]:
+    """
+    Read *path* from local disk, send the bytes to the server, and return
+    (ok, message).
+
+    Pre-flight checks happen before the file is even read so we don't
+    waste a slurp on a file that's obviously too large. All failures are
+    returned as ``(False, "...")``; the caller decides whether to surface
+    them as status messages or treat them differently.
+
+    When running --offline, the file is still read (to learn its size
+    for the documents list) but nothing is sent.
+    """
+    try:
+        size = os.path.getsize(path)
+    except OSError as exc:
+        return False, f"Cannot read '{path}': {exc}"
+
+    if size > MAX_UPLOAD_BYTES:
+        return False, (
+            f"'{os.path.basename(path)}' is {size} bytes — exceeds the "
+            f"{MAX_UPLOAD_BYTES}-byte cap"
+        )
+
+    try:
+        with open(path, "rb") as f:
+            raw = f.read()
+    except OSError as exc:
+        return False, f"Cannot read '{path}': {exc}"
+
+    name = os.path.basename(path)
+    client = state.get("ai_client")
+
+    if client is None:
+        # Offline: simulate a successful upload so the UI flow still works.
+        state["documents"].append(
+            {
+                "name": name,
+                "size": size,
+                "uploaded_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            }
+        )
+        return True, f"'{name}' added locally (offline -- not sent to server)"
+
+    try:
+        ack = client.upload(name, raw, username=state.get("username") or "anonymous")
+    except AIClientError as exc:
+        state["ai_status"] = f"error: {exc}"
+        return False, f"Upload failed: {exc}"
+
+    state["ai_status"] = f"online ({client.host}:{client.port})"
+    state["documents"].append(
+        {
+            "name": ack.get("filename", name),
+            "size": ack.get("size", size),
+            "uploaded_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        }
+    )
+    return True, f"'{name}' uploaded ({size} bytes)"
+
+
+# Color pair IDs
+C_NORMAL = 1
+C_HEADER = 2
+C_ACCENT = 3
+C_DIM = 4
+C_ERROR = 5
+C_SUCCESS = 6
+C_USER_MSG = 7
+C_AI_MSG = 8
+
+
+# Safe wrappers
+def safe_curs_set(v: int) -> None:
     try:
         curses.curs_set(v)
     except curses.error:
         pass
 
-def safe_addstr(win, y, x, s, attr=0):
+
+def safe_addstr(win: curses.window, y: int, x: int, s: str, attr: int = 0) -> None:
     try:
         h, w = win.getmaxyx()
         if y < 0 or y >= h or x < 0 or x >= w:
@@ -108,7 +177,8 @@ def safe_addstr(win, y, x, s, attr=0):
     except curses.error:
         pass
 
-def init_colors():
+
+def init_colors() -> None:
     curses.start_color()
     try:
         curses.use_default_colors()
@@ -116,49 +186,60 @@ def init_colors():
     except curses.error:
         bg = curses.COLOR_BLACK
 
-    curses.init_pair(C_NORMAL,   curses.COLOR_WHITE,  bg)
-    curses.init_pair(C_HEADER,   curses.COLOR_BLACK,  curses.COLOR_CYAN)
-    curses.init_pair(C_ACCENT,   curses.COLOR_CYAN,   bg)
-    curses.init_pair(C_DIM,      curses.COLOR_WHITE,  bg)
-    curses.init_pair(C_ERROR,    curses.COLOR_RED,    bg)
-    curses.init_pair(C_SUCCESS,  curses.COLOR_GREEN,  bg)
-    curses.init_pair(C_USER_MSG, curses.COLOR_CYAN,   bg)
-    curses.init_pair(C_AI_MSG,   curses.COLOR_YELLOW, bg)
+    curses.init_pair(C_NORMAL, curses.COLOR_WHITE, bg)
+    curses.init_pair(C_HEADER, curses.COLOR_BLACK, curses.COLOR_CYAN)
+    curses.init_pair(C_ACCENT, curses.COLOR_CYAN, bg)
+    curses.init_pair(C_DIM, curses.COLOR_WHITE, bg)
+    curses.init_pair(C_ERROR, curses.COLOR_RED, bg)
+    curses.init_pair(C_SUCCESS, curses.COLOR_GREEN, bg)
+    curses.init_pair(C_USER_MSG, curses.COLOR_CYAN, bg)
+    curses.init_pair(C_AI_MSG, curses.COLOR_YELLOW, bg)
 
-# ── Drawing helpers ──────────────────────────────────────────────────────────
-def draw_header(win, title):
+
+# Drawing helpers
+def draw_header(win: curses.window, title: str) -> None:
     h, w = win.getmaxyx()
     text = f"  DocChat  --  {title}  "
-    safe_addstr(win, 0, 0, text.ljust(w - 1),
-                curses.color_pair(C_HEADER) | curses.A_BOLD)
+    safe_addstr(
+        win, 0, 0, text.ljust(w - 1), curses.color_pair(C_HEADER) | curses.A_BOLD
+    )
 
-def draw_footer(win, hints):
+
+def draw_footer(win: curses.window, hints: list[str]) -> None:
     h, w = win.getmaxyx()
     text = "   ".join(hints)
     safe_addstr(win, h - 1, 0, text.ljust(w - 1), curses.color_pair(C_HEADER))
 
-def center_text(win, row, text, attr=0):
+
+def center_text(win: curses.window, row: int, text: str, attr: int = 0) -> None:
     _, w = win.getmaxyx()
     col = max(0, (w - len(text)) // 2)
     safe_addstr(win, row, col, text, attr)
 
-def draw_box(win, y, x, h, w, title=""):
-    """Plain ASCII box - works on every Windows terminal."""
-    safe_addstr(win, y,     x,     "+")
-    safe_addstr(win, y,     x+w-1, "+")
-    safe_addstr(win, y+h-1, x,     "+")
-    safe_addstr(win, y+h-1, x+w-1, "+")
-    for i in range(1, w - 1):
-        safe_addstr(win, y,     x+i, "-")
-        safe_addstr(win, y+h-1, x+i, "-")
-    for i in range(1, h - 1):
-        safe_addstr(win, y+i, x,     "|")
-        safe_addstr(win, y+i, x+w-1, "|")
-    if title:
-        safe_addstr(win, y, x + 2, f" {title} ",
-                    curses.color_pair(C_ACCENT) | curses.A_BOLD)
 
-def read_line(win, y, x, max_len, mask=False):
+def draw_box(
+    win: curses.window, y: int, x: int, h: int, w: int, title: str = ""
+) -> None:
+    """Plain ASCII box - works on every Windows terminal."""
+    safe_addstr(win, y, x, "+")
+    safe_addstr(win, y, x + w - 1, "+")
+    safe_addstr(win, y + h - 1, x, "+")
+    safe_addstr(win, y + h - 1, x + w - 1, "+")
+    for i in range(1, w - 1):
+        safe_addstr(win, y, x + i, "-")
+        safe_addstr(win, y + h - 1, x + i, "-")
+    for i in range(1, h - 1):
+        safe_addstr(win, y + i, x, "|")
+        safe_addstr(win, y + i, x + w - 1, "|")
+    if title:
+        safe_addstr(
+            win, y, x + 2, f" {title} ", curses.color_pair(C_ACCENT) | curses.A_BOLD
+        )
+
+
+def read_line(
+    win: curses.window, y: int, x: int, max_len: int, mask: bool = False
+) -> str:
     curses.echo()
     safe_curs_set(1)
     try:
@@ -166,7 +247,7 @@ def read_line(win, y, x, max_len, mask=False):
     except curses.error:
         pass
     win.refresh()
-    buf = []
+    buf: list[str] = []
     while True:
         ch = win.getch()
         if ch in (10, 13):
@@ -187,18 +268,22 @@ def read_line(win, y, x, max_len, mask=False):
     safe_curs_set(0)
     return "".join(buf)
 
-# ── Screens ──────────────────────────────────────────────────────────────────
 
-def screen_login(stdscr):
+# Screens
+
+
+def screen_login(stdscr: curses.window) -> None:
     stdscr.clear()
     h, w = stdscr.getmaxyx()
     draw_header(stdscr, "Login")
     draw_footer(stdscr, ["Enter to confirm", "Ctrl+C to quit"])
 
-    center_text(stdscr, 2, "Welcome to DocChat",
-                curses.color_pair(C_ACCENT) | curses.A_BOLD)
-    center_text(stdscr, 3, "AI-powered document Q&A",
-                curses.color_pair(C_DIM) | curses.A_DIM)
+    center_text(
+        stdscr, 2, "Welcome to DocChat", curses.color_pair(C_ACCENT) | curses.A_BOLD
+    )
+    center_text(
+        stdscr, 3, "AI-powered document Q&A", curses.color_pair(C_DIM) | curses.A_DIM
+    )
 
     bw, bh = 42, 11
     bx = max(0, (w - bw) // 2)
@@ -207,29 +292,39 @@ def screen_login(stdscr):
 
     safe_addstr(stdscr, by + 2, bx + 3, "Username:", curses.color_pair(C_ACCENT))
     safe_addstr(stdscr, by + 5, bx + 3, "Password:", curses.color_pair(C_ACCENT))
-    safe_addstr(stdscr, by + 9, bx + 3, "(any credentials work -- stub mode)",
-                curses.color_pair(C_DIM) | curses.A_DIM)
+    safe_addstr(
+        stdscr,
+        by + 9,
+        bx + 3,
+        "(any credentials work -- stub mode)",
+        curses.color_pair(C_DIM) | curses.A_DIM,
+    )
     stdscr.refresh()
 
     username = read_line(stdscr, by + 3, bx + 3, bw - 6)
     read_line(stdscr, by + 6, bx + 3, bw - 6, mask=True)
 
-    state["username"]  = username or "guest"
+    state["username"] = username or "guest"
     state["logged_in"] = True
 
-    safe_addstr(stdscr, by + 7, bx + 3, "Logged in!",
-                curses.color_pair(C_SUCCESS) | curses.A_BOLD)
+    safe_addstr(
+        stdscr,
+        by + 7,
+        bx + 3,
+        "Logged in!",
+        curses.color_pair(C_SUCCESS) | curses.A_BOLD,
+    )
     stdscr.refresh()
     time.sleep(0.7)
     state["current_screen"] = "main"
 
 
-def screen_main(stdscr):
+def screen_main(stdscr: curses.window) -> None:
     """Main menu with >> arrow on selected item."""
     menu_items = [
-        ("1", "Chat with AI",     "chat",   "Ask questions about your documents"),
+        ("1", "Chat with AI", "chat", "Ask questions about your documents"),
         ("2", "Manage Documents", "upload", "Upload and view your files"),
-        ("Q", "Quit",             "quit",   ""),
+        ("Q", "Quit", "quit", ""),
     ]
     selected = 0
 
@@ -239,35 +334,50 @@ def screen_main(stdscr):
         draw_header(stdscr, f"Main Menu  [{state['username']}]")
         draw_footer(stdscr, ["Up/Down to navigate", "Enter to select", "Q to quit"])
 
-        center_text(stdscr, 2, "What would you like to do?",
-                    curses.color_pair(C_ACCENT) | curses.A_BOLD)
+        center_text(
+            stdscr,
+            2,
+            "What would you like to do?",
+            curses.color_pair(C_ACCENT) | curses.A_BOLD,
+        )
 
         col = max(4, w // 2 - 18)
         for i, (key, label, _, desc) in enumerate(menu_items):
-            row    = 5 + i * 3
-            is_sel = (i == selected)
+            row = 5 + i * 3
+            is_sel = i == selected
 
-            arrow      = ">>  " if is_sel else "    "
+            arrow = ">>  " if is_sel else "    "
             attr_arrow = curses.color_pair(C_ACCENT) | curses.A_BOLD
-            attr_key   = (curses.color_pair(C_ACCENT) | curses.A_BOLD) if is_sel \
-                         else curses.color_pair(C_DIM) | curses.A_DIM
-            attr_label = (curses.color_pair(C_NORMAL) | curses.A_BOLD) if is_sel \
-                         else curses.color_pair(C_NORMAL)
-            attr_desc  = curses.color_pair(C_DIM) | curses.A_DIM
+            attr_key = (
+                (curses.color_pair(C_ACCENT) | curses.A_BOLD)
+                if is_sel
+                else curses.color_pair(C_DIM) | curses.A_DIM
+            )
+            attr_label = (
+                (curses.color_pair(C_NORMAL) | curses.A_BOLD)
+                if is_sel
+                else curses.color_pair(C_NORMAL)
+            )
+            attr_desc = curses.color_pair(C_DIM) | curses.A_DIM
 
-            safe_addstr(stdscr, row, col,      arrow,         attr_arrow if is_sel else attr_desc)
-            safe_addstr(stdscr, row, col + 4,  f"[{key}]  ", attr_key)
-            safe_addstr(stdscr, row, col + 9,  label,         attr_label)
+            safe_addstr(stdscr, row, col, arrow, attr_arrow if is_sel else attr_desc)
+            safe_addstr(stdscr, row, col + 4, f"[{key}]  ", attr_key)
+            safe_addstr(stdscr, row, col + 9, label, attr_label)
             if desc:
-                safe_addstr(stdscr, row + 1, col + 9, desc,  attr_desc)
+                safe_addstr(stdscr, row + 1, col + 9, desc, attr_desc)
 
         doc_count = len(state["documents"])
-        safe_addstr(stdscr, h - 3, 2, f"Documents in store: {doc_count}",
-                    curses.color_pair(C_DIM) | curses.A_DIM)
+        safe_addstr(
+            stdscr,
+            h - 3,
+            2,
+            f"Documents in store: {doc_count}",
+            curses.color_pair(C_DIM) | curses.A_DIM,
+        )
         stdscr.refresh()
 
         dest = None
-        ch   = stdscr.getch()
+        ch = stdscr.getch()
 
         if ch == curses.KEY_UP:
             selected = (selected - 1) % len(menu_items)
@@ -277,18 +387,19 @@ def screen_main(stdscr):
             dest = menu_items[selected][2]
         elif 0 < ch < 256 and chr(ch).lower() in ("1", "2", "q"):
             mapping = {"1": "chat", "2": "upload", "q": "quit"}
-            dest    = mapping[chr(ch).lower()]
+            dest = mapping[chr(ch).lower()]
 
         if dest == "quit":
-            return False
+            return
         elif dest == "chat":
             screen_chat(stdscr)
         elif dest == "upload":
             screen_documents(stdscr)
 
 
-def screen_documents(stdscr):
-    msg      = ""
+def screen_documents(stdscr: curses.window) -> None:
+    msg = ""
+    msg_attr = C_SUCCESS
     selected = 0
 
     while True:
@@ -297,33 +408,47 @@ def screen_documents(stdscr):
         draw_header(stdscr, "Document Manager")
         draw_footer(stdscr, ["U upload", "D delete", "B back", "Up/Down navigate"])
 
-        safe_addstr(stdscr, 2, 2, "Your uploaded documents:",
-                    curses.color_pair(C_ACCENT) | curses.A_BOLD)
+        safe_addstr(
+            stdscr,
+            2,
+            2,
+            "Your uploaded documents:",
+            curses.color_pair(C_ACCENT) | curses.A_BOLD,
+        )
 
-        docs     = state["documents"]
+        docs = state["documents"]
         list_top = 4
-        list_h   = h - 8
+        list_h = h - 8
 
         for i, doc in enumerate(docs[:list_h]):
-            row     = list_top + i
+            row = list_top + i
             size_kb = doc["size"] / 1024
-            is_sel  = (i == selected)
-            arrow   = ">> " if is_sel else "   "
-            line    = f"{doc['name']:<28}  {size_kb:>6.1f} KB   {doc['uploaded_at']}"
-            attr    = (curses.color_pair(C_ACCENT) | curses.A_BOLD) if is_sel \
-                      else curses.color_pair(C_NORMAL)
+            is_sel = i == selected
+            arrow = ">> " if is_sel else "   "
+            line = f"{doc['name']:<28}  {size_kb:>6.1f} KB   {doc['uploaded_at']}"
+            attr = (
+                (curses.color_pair(C_ACCENT) | curses.A_BOLD)
+                if is_sel
+                else curses.color_pair(C_NORMAL)
+            )
             safe_addstr(stdscr, row, 2, arrow + line, attr)
 
         if not docs:
-            safe_addstr(stdscr, list_top, 2, "  (no documents yet)",
-                        curses.color_pair(C_DIM) | curses.A_DIM)
+            safe_addstr(
+                stdscr,
+                list_top,
+                2,
+                "  (no documents yet)",
+                curses.color_pair(C_DIM) | curses.A_DIM,
+            )
         if msg:
-            safe_addstr(stdscr, h - 4, 2, msg,
-                        curses.color_pair(C_SUCCESS) | curses.A_BOLD)
+            safe_addstr(
+                stdscr, h - 4, 2, msg, curses.color_pair(msg_attr) | curses.A_BOLD
+            )
         stdscr.refresh()
 
         ch = stdscr.getch()
-        c  = chr(ch).lower() if 0 < ch < 256 else ""
+        c = chr(ch).lower() if 0 < ch < 256 else ""
 
         if ch == curses.KEY_UP and docs:
             selected = max(0, selected - 1)
@@ -331,33 +456,42 @@ def screen_documents(stdscr):
             selected = min(len(docs) - 1, selected + 1)
         elif c == "u":
             safe_addstr(stdscr, h - 6, 2, " " * (w - 4))
-            safe_addstr(stdscr, h - 6, 2, "File path to upload:",
-                        curses.color_pair(C_ACCENT))
+            safe_addstr(
+                stdscr, h - 6, 2, "File path to upload:", curses.color_pair(C_ACCENT)
+            )
             stdscr.refresh()
             path = read_line(stdscr, h - 5, 2, w - 4).strip()
             if path and os.path.isfile(path):
-                name = os.path.basename(path)
-                size = os.path.getsize(path)
-                state["documents"].append({
-                    "name":        name,
-                    "size":        size,
-                    "uploaded_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                })
-                msg = f"'{name}' uploaded (stub - not sent to DB)"
+                # Show a transient status while we read + ship the bytes.
+                safe_addstr(stdscr, h - 4, 2, " " * (w - 4))
+                safe_addstr(
+                    stdscr,
+                    h - 4,
+                    2,
+                    "Uploading...",
+                    curses.color_pair(C_DIM) | curses.A_DIM,
+                )
+                stdscr.refresh()
+
+                ok, msg = upload_file_to_server(path)
+                msg_attr = C_SUCCESS if ok else C_ERROR
             elif path:
                 msg = f"File not found: {path}"
+                msg_attr = C_ERROR
             else:
                 msg = ""
+                msg_attr = C_SUCCESS
         elif c == "d" and docs:
-            removed  = docs.pop(selected)
+            removed = docs.pop(selected)
             selected = max(0, selected - 1)
-            msg      = f"'{removed['name']}' removed (stub)"
+            msg = f"'{removed['name']}' removed (local only)"
+            msg_attr = C_SUCCESS
         elif c == "b":
             break
 
 
-def screen_chat(stdscr):
-    input_buf     = ""
+def screen_chat(stdscr: curses.window) -> None:
+    input_buf = ""
     scroll_offset = 0
 
     while True:
@@ -374,44 +508,53 @@ def screen_chat(stdscr):
         # Build wrapped display lines
         all_lines = []
         for m in state["messages"]:
-            ts   = m["time"]
+            ts = m["time"]
             role = m["role"]
             if role == "user":
                 prefix = f"  You [{ts}]: "
-                attr   = curses.color_pair(C_USER_MSG) | curses.A_BOLD
+                attr = curses.color_pair(C_USER_MSG) | curses.A_BOLD
             else:
                 prefix = f"  AI  [{ts}]: "
-                attr   = curses.color_pair(C_AI_MSG)
-            wrap_w  = max(1, w - 4 - len(prefix))
+                attr = curses.color_pair(C_AI_MSG)
+            wrap_w = max(1, w - 4 - len(prefix))
             wrapped = textwrap.wrap(m["text"], wrap_w) or [""]
             for j, line in enumerate(wrapped):
                 pfx = prefix if j == 0 else " " * len(prefix)
                 all_lines.append((attr, pfx + line))
             all_lines.append((curses.color_pair(C_NORMAL), ""))
 
-        total_lines   = len(all_lines)
-        max_scroll    = max(0, total_lines - msg_area_h)
+        total_lines = len(all_lines)
+        max_scroll = max(0, total_lines - msg_area_h)
         scroll_offset = min(scroll_offset, max_scroll)
-        view_start    = max(0, total_lines - msg_area_h - scroll_offset)
+        view_start = max(0, total_lines - msg_area_h - scroll_offset)
 
-        for i, (attr, text) in enumerate(all_lines[view_start:view_start + msg_area_h]):
+        for i, (attr, text) in enumerate(
+            all_lines[view_start : view_start + msg_area_h]
+        ):
             safe_addstr(stdscr, 1 + i, 2, text, attr)
 
         if not state["messages"]:
-            safe_addstr(stdscr, 3, 4,
-                        "No messages yet. Ask something about your documents!",
-                        curses.color_pair(C_DIM) | curses.A_DIM)
+            safe_addstr(
+                stdscr,
+                3,
+                4,
+                "No messages yet. Ask something about your documents!",
+                curses.color_pair(C_DIM) | curses.A_DIM,
+            )
 
         safe_addstr(stdscr, h - 4, 0, "-" * (w - 1), curses.color_pair(C_ACCENT))
-        safe_addstr(stdscr, h - 3, 2, "> ",
-                    curses.color_pair(C_ACCENT) | curses.A_BOLD)
-        input_display = input_buf[-(w - 7):]
+        safe_addstr(stdscr, h - 3, 2, "> ", curses.color_pair(C_ACCENT) | curses.A_BOLD)
+        input_display = input_buf[-(w - 7) :]
         safe_addstr(stdscr, h - 3, 4, input_display, curses.color_pair(C_NORMAL))
 
         if scroll_offset > 0:
-            safe_addstr(stdscr, h - 2, 2,
-                        f"^ scrolled up {scroll_offset} line(s) -- PgDn to go down",
-                        curses.color_pair(C_DIM) | curses.A_DIM)
+            safe_addstr(
+                stdscr,
+                h - 2,
+                2,
+                f"^ scrolled up {scroll_offset} line(s) -- PgDn to go down",
+                curses.color_pair(C_DIM) | curses.A_DIM,
+            )
 
         stdscr.refresh()
         safe_curs_set(1)
@@ -434,26 +577,34 @@ def screen_chat(stdscr):
             if text:
                 now = datetime.now().strftime("%H:%M")
                 state["messages"].append({"role": "user", "text": text, "time": now})
-                input_buf     = ""
+                input_buf = ""
                 scroll_offset = 0
 
                 # Show a "thinking" hint while we wait on the server.
-                safe_addstr(stdscr, h - 2, 2, "AI is thinking...",
-                            curses.color_pair(C_DIM) | curses.A_DIM)
+                safe_addstr(
+                    stdscr,
+                    h - 2,
+                    2,
+                    "AI is thinking...",
+                    curses.color_pair(C_DIM) | curses.A_DIM,
+                )
                 stdscr.refresh()
 
                 answer = fetch_ai_response(text)
                 reply_time = datetime.now().strftime("%H:%M")
-                state["messages"].append({"role": "ai", "text": answer, "time": reply_time})
+                state["messages"].append(
+                    {"role": "ai", "text": answer, "time": reply_time}
+                )
         elif ch in (ord("b"), ord("B")) and not input_buf:
             break
         elif 32 <= ch < 127:
             input_buf += chr(ch)
 
 
-# ── Entry point ──────────────────────────────────────────────────────────────
+# Entry point
 
-def main(stdscr):
+
+def main(stdscr: curses.window) -> None:
     safe_curs_set(0)
     if hasattr(curses, "set_escdelay"):
         curses.set_escdelay(50)
@@ -468,20 +619,27 @@ def main(stdscr):
 
     stdscr.clear()
     h, w = stdscr.getmaxyx()
-    center_text(stdscr, h // 2, "Goodbye!",
-                curses.color_pair(C_ACCENT) | curses.A_BOLD)
+    center_text(stdscr, h // 2, "Goodbye!", curses.color_pair(C_ACCENT) | curses.A_BOLD)
     stdscr.refresh()
     time.sleep(0.6)
 
 
 def _parse_cli() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="DocChat TUI client")
-    p.add_argument("--host", default="127.0.0.1",
-                   help="dummy AI server host (default %(default)s)")
-    p.add_argument("--port", type=int, default=5555,
-                   help="dummy AI server port (default %(default)s)")
-    p.add_argument("--offline", action="store_true",
-                   help="skip the server entirely and use the local stub")
+    p.add_argument(
+        "--host", default="127.0.0.1", help="dummy AI server host (default %(default)s)"
+    )
+    p.add_argument(
+        "--port",
+        type=int,
+        default=5555,
+        help="dummy AI server port (default %(default)s)",
+    )
+    p.add_argument(
+        "--offline",
+        action="store_true",
+        help="skip the server entirely and use the local stub",
+    )
     return p.parse_args()
 
 

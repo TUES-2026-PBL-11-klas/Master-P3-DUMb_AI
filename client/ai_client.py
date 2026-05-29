@@ -3,18 +3,41 @@ Socket client for talking to the DocChat dummy AI server.
 
 Encapsulates the newline-delimited JSON protocol so the TUI stays focused on
 rendering. Reconnects automatically on the next call after a dropped socket.
+
+Wire protocol (see services.dummy_server for the server side):
+
+    Client -> Server:
+        {"type": "ping"}
+        {"type": "query",  "username": <str>, "text": <str>}
+        {"type": "upload", "username": <str>, "filename": <str>,
+                           "bytes_b64": <base64 str>}
+
+    Server -> Client:
+        {"type": "pong"}
+        {"type": "answer",     "text": <str>}
+        {"type": "upload_ack", "filename": <str>, "size": <int>}
+        {"type": "error",      "message": <str>}
 """
 
 from __future__ import annotations
 
+import base64
 import json
 import socket
 import threading
-from typing import Any
+from typing import IO, Any
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 5555
 DEFAULT_TIMEOUT = 10.0  # seconds for a single request/response round-trip
+
+# Default upload timeout — larger files take longer to round-trip than queries.
+UPLOAD_TIMEOUT = 60.0
+
+# Per-upload size cap on the client side. Mirrors the server's cap
+# "Hard upload size cap (default: 5 MB per file)").
+# Catching this on the client saves a wasted base64-encode + transmit + reject.
+MAX_UPLOAD_BYTES = 5 * 1024 * 1024  # 5 MB
 
 
 class AIClientError(RuntimeError):
@@ -39,7 +62,7 @@ class AIClient:
         self.port = port
         self.timeout = timeout
         self._sock: socket.socket | None = None
-        self._rfile = None  # buffered reader for line-based reads
+        self._rfile: IO[bytes] | None = None  # buffered reader for line-based reads
         self._lock = threading.Lock()
 
     # -- lifecycle -----------------------------------------------------------
@@ -47,7 +70,9 @@ class AIClient:
         if self._sock is not None:
             return
         try:
-            sock = socket.create_connection((self.host, self.port), timeout=self.timeout)
+            sock = socket.create_connection(
+                (self.host, self.port), timeout=self.timeout
+            )
         except OSError as exc:
             raise AIClientError(
                 f"cannot connect to AI server at {self.host}:{self.port} ({exc})"
@@ -106,8 +131,81 @@ class AIClient:
             raise AIClientError(f"server error: {reply.get('message', 'unknown')}")
         raise AIClientError(f"unexpected reply type: {reply.get('type')!r}")
 
+    def upload(
+        self,
+        filename: str,
+        raw: bytes,
+        username: str = "anonymous",
+    ) -> dict[str, Any]:
+        """
+        Send a file upload and return the server's acknowledgement.
+
+        The TUI reads the file from local disk into *raw* and calls this
+        method. Bytes are base64-encoded before being wrapped in JSON so
+        the existing newline-delimited transport stays text-safe.
+
+        Args:
+            filename: Original filename to associate with the upload
+                      (used by the server for parser dispatch + logging).
+                      Only the basename is sent — the client's local
+                      directory layout is irrelevant on the server.
+            raw:      The raw file bytes.
+            username: Authenticated user (currently stub-tracked).
+
+        Returns:
+            The decoded server reply, e.g. ``{"type": "upload_ack",
+            "filename": "...", "size": 1234}``.
+
+        Raises:
+            AIClientError: on size-cap violation, transport failure, or
+                           an error reply from the server.
+        """
+        if not isinstance(raw, (bytes, bytearray)):
+            raise AIClientError(f"upload expected bytes, got {type(raw).__name__}")
+
+        if len(raw) > MAX_UPLOAD_BYTES:
+            raise AIClientError(
+                f"file '{filename}' is {len(raw)} bytes — exceeds "
+                f"the {MAX_UPLOAD_BYTES}-byte upload cap"
+            )
+
+        # Strip any directory component on the way out — what we send is
+        # metadata, not a path.
+        import os
+
+        base = os.path.basename(filename)
+        if not base:
+            raise AIClientError(f"invalid filename: {filename!r}")
+
+        payload_b64 = base64.b64encode(bytes(raw)).decode("ascii")
+        message = {
+            "type": "upload",
+            "username": username,
+            "filename": base,
+            "bytes_b64": payload_b64,
+        }
+
+        reply = self._round_trip(message, timeout=UPLOAD_TIMEOUT)
+        kind = reply.get("type")
+        if kind == "upload_ack":
+            return reply
+        if kind == "error":
+            raise AIClientError(f"server error: {reply.get('message', 'unknown')}")
+        raise AIClientError(f"unexpected reply type: {kind!r}")
+
     # -- internals -----------------------------------------------------------
-    def _round_trip(self, message: dict[str, Any]) -> dict[str, Any]:
+    def _round_trip(
+        self,
+        message: dict[str, Any],
+        *,
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
+        """
+        Send *message*, read one reply line, return the decoded JSON.
+
+        If *timeout* is given, it's applied to this one round-trip only;
+        the socket's prior timeout is restored before we return.
+        """
         with self._lock:
             # First attempt; reconnect once if the socket is stale.
             for attempt in (1, 2):
@@ -115,8 +213,21 @@ class AIClient:
                     if self._sock is None:
                         # connect() takes the lock too -- inline to avoid recursion.
                         self._connect_locked()
-                    self._send_locked(message)
-                    return self._recv_locked()
+
+                    prior_timeout: float | None = None
+                    if timeout is not None and self._sock is not None:
+                        prior_timeout = self._sock.gettimeout()
+                        self._sock.settimeout(timeout)
+                    try:
+                        self._send_locked(message)
+                        return self._recv_locked()
+                    finally:
+                        if (
+                            timeout is not None
+                            and self._sock is not None
+                            and prior_timeout is not None
+                        ):
+                            self._sock.settimeout(prior_timeout)
                 except (OSError, AIClientError) as exc:
                     self._close_locked()
                     if attempt == 2:
@@ -126,7 +237,9 @@ class AIClient:
 
     def _connect_locked(self) -> None:
         try:
-            sock = socket.create_connection((self.host, self.port), timeout=self.timeout)
+            sock = socket.create_connection(
+                (self.host, self.port), timeout=self.timeout
+            )
         except OSError as exc:
             raise AIClientError(
                 f"cannot connect to AI server at {self.host}:{self.port} ({exc})"
