@@ -22,7 +22,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from services.shared.domain import IngestionStatus
+from services.shared.domain import IngestionStatus, DocumentStatus
 from services.shared.exceptions import EmbeddingError
 
 if TYPE_CHECKING:
@@ -137,6 +137,7 @@ class EmbeddingObserver:
             chunk.embedding = vector
 
         event.status = IngestionStatus.EMBEDDED
+        event.document.mark_status(DocumentStatus.EMBEDDED)
 
         logger.info(
             "EmbeddingObserver: successfully embedded %d chunk(s) "

@@ -8,7 +8,7 @@ to handle specific failure modes individually.
 Hierarchy:
     RAGException
     ├── UnsupportedFormatError   (parser received an unrecognised extension)
-    ├── EmbeddingError           (embedding call failed)
+    ├── EmbeddingError           (llama.cpp embedding call failed)
     ├── BigSentenceError         (chunker received a sentence over the token cap)
     └── StorageError             (vector store read/write failed)
 """
@@ -26,7 +26,7 @@ class UnsupportedFormatError(RAGException):
 
 class EmbeddingError(RAGException):
     """
-    Raised when the Ollama BGE-M3 embedding call fails.
+    Raised when the llama.cpp BGE-M3 embedding call fails.
 
     Wraps the underlying network or model error as ``__cause__``.
     """
