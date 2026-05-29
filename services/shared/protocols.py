@@ -1,5 +1,4 @@
 from __future__ import annotations
-from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, Protocol, TypeVar, runtime_checkable
 
 if TYPE_CHECKING:
@@ -14,8 +13,12 @@ T_inv = TypeVar("T_inv")  # for VectorStore (input + output)
 # DocumentParser[T]
 #
 # Strategy interface — each concrete parser handles one (or more) file types
-# and converts raw file bytes into a typed domain object T
-# The registry dispatches to the right parser based on file extension
+# and converts raw file bytes into a typed domain object T.
+#
+# Parsers operate on in-memory bytes, not filesystem paths: the server
+# receives uploads over a socket and never sees the client's local disk. The
+# filename is carried alongside the bytes only for traceability — it ends up
+# in Document.filename and eventually in Chunk.metadata["source_file"].
 @runtime_checkable
 class DocumentParser(Protocol[T_co]):
     """
@@ -30,14 +33,24 @@ class DocumentParser(Protocol[T_co]):
         tuple[str, ...]
     ]  # Attribute listing canonical supported extensions ("txt", "md")
 
-    def parse(self, path: Path) -> T_co:
+    def parse(self, raw: bytes | bytearray, filename: str) -> T_co:
         """
-        Read *path* from disk and return a fully-constructed domain object.
+        Decode *raw* and return a fully-constructed domain object.
+
+        Args:
+            raw:      The raw file bytes as received from the client over
+                      the wire. Parsers are responsible for character-set
+                      decoding (each parser carries its own encoding
+                      fallback ladder).
+            filename: The original filename supplied by the client. Used
+                      for extension validation, for the Document.filename
+                      field, and for log/error messages. Parsers MUST NOT
+                      treat this as a filesystem path — it is metadata.
 
         Raises:
-            UnsupportedFormatError: if the file extension is not handled by
-            this parser.
-            RAGException: for any other parsing failure.
+            UnsupportedFormatError: if the filename's extension is not
+                handled by this parser.
+            RAGException: for any decoding or unexpected error.
         """
         ...
 
