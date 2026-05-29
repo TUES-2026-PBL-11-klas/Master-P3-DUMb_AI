@@ -100,7 +100,6 @@ class TxtParser:
             content=content,
             filename=path.name,
             uploaded_at=datetime.now(tz=timezone.utc),
-            content_type="text/plain",
             status=DocumentStatus.PARSED,
         )
 

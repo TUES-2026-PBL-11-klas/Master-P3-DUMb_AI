@@ -136,7 +136,6 @@ class MarkdownParser:
             content=content,
             filename=path.name,
             uploaded_at=datetime.now(tz=timezone.utc),
-            content_type="text/markdown",
             status=DocumentStatus.PARSED,
         )
 
