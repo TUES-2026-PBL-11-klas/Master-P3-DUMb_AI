@@ -189,18 +189,61 @@ def read_line(win, y, x, max_len, mask=False):
 
 # ── Screens ──────────────────────────────────────────────────────────────────
 
+def screen_auth_choice(stdscr):
+    """
+    Entry screen: ask the user whether they want to log in or sign up.
+
+    Returns "login" or "signup".
+    """
+    selected = 0
+    options = ["Login", "Sign Up"]
+
+    while True:
+        stdscr.clear()
+        h, w = stdscr.getmaxyx()
+        draw_header(stdscr, "Welcome")
+        draw_footer(stdscr, ["Up/Down to navigate", "Enter to select", "Ctrl+C to quit"])
+
+        center_text(stdscr, 2, "Welcome to DocChat",
+                    curses.color_pair(C_ACCENT) | curses.A_BOLD)
+        center_text(stdscr, 3, "AI-powered document Q&A",
+                    curses.color_pair(C_DIM) | curses.A_DIM)
+
+        bw, bh = 40, 10
+        bx = max(0, (w - bw) // 2)
+        by = max(1, (h - bh) // 2)
+        draw_box(stdscr, by, bx, bh, bw, "Get Started")
+
+        for i, label in enumerate(options):
+            row = by + 2 + i * 3
+            is_sel = (i == selected)
+            arrow = ">>  " if is_sel else "    "
+            attr = (curses.color_pair(C_ACCENT) | curses.A_BOLD) if is_sel \
+                   else curses.color_pair(C_NORMAL)
+            safe_addstr(stdscr, row, bx + 4, arrow + label, attr)
+
+        stdscr.refresh()
+
+        ch = stdscr.getch()
+        if ch == curses.KEY_UP:
+            selected = (selected - 1) % len(options)
+        elif ch == curses.KEY_DOWN:
+            selected = (selected + 1) % len(options)
+        elif ch in (10, 13):
+            return "login" if selected == 0 else "signup"
+        elif ch in (ord("1"),):
+            return "login"
+        elif ch in (ord("2"),):
+            return "signup"
+
+
 def screen_login(stdscr):
     """
-    Sign-in / sign-up screen.
+    Login screen — verifies credentials against the DB.
 
-    Sends credentials to the backend over the socket protocol. The
-    server either:
-      - creates a new account (first time we see this username), or
-      - verifies the password against the stored hash.
-
-    On wrong password we clear the box and ask again. If the server is
-    unreachable we accept the credentials locally (offline stub) so the
-    rest of the TUI is still demoable without the backend running.
+    On wrong password the error is shown and the user is asked to try
+    again. If the server is unreachable, credentials are accepted locally
+    (offline stub) so the TUI is still demoable without the backend.
     """
     error_msg = ""
 
@@ -210,15 +253,15 @@ def screen_login(stdscr):
         draw_header(stdscr, "Login")
         draw_footer(stdscr, ["Enter to confirm", "Ctrl+C to quit"])
 
-        center_text(stdscr, 2, "Welcome to DocChat",
+        center_text(stdscr, 2, "Welcome back!",
                     curses.color_pair(C_ACCENT) | curses.A_BOLD)
-        center_text(stdscr, 3, "AI-powered document Q&A",
+        center_text(stdscr, 3, "Sign in to your existing account",
                     curses.color_pair(C_DIM) | curses.A_DIM)
 
         bw, bh = 52, 12
         bx = max(0, (w - bw) // 2)
         by = max(1, (h - bh) // 2)
-        draw_box(stdscr, by, bx, bh, bw, "Sign In / Sign Up")
+        draw_box(stdscr, by, bx, bh, bw, "Login")
 
         safe_addstr(stdscr, by + 2, bx + 3, "Username:", curses.color_pair(C_ACCENT))
         safe_addstr(stdscr, by + 5, bx + 3, "Password:", curses.color_pair(C_ACCENT))
@@ -227,10 +270,6 @@ def screen_login(stdscr):
         if client is None:
             safe_addstr(stdscr, by + 9, bx + 3,
                         "(offline -- credentials accepted locally)",
-                        curses.color_pair(C_DIM) | curses.A_DIM)
-        else:
-            safe_addstr(stdscr, by + 9, bx + 3,
-                        "(new username = sign-up; existing = sign-in)",
                         curses.color_pair(C_DIM) | curses.A_DIM)
 
         if error_msg:
@@ -246,8 +285,7 @@ def screen_login(stdscr):
             error_msg = "Username and password are required."
             continue
 
-        # Offline mode: keep the legacy "always succeeds" behaviour so
-        # the rest of the TUI remains demoable without a backend.
+        # Offline mode: accept locally so the TUI is demoable without a backend.
         if client is None:
             state["username"] = username
             state["logged_in"] = True
@@ -258,24 +296,125 @@ def screen_login(stdscr):
             state["current_screen"] = "main"
             return
 
-        # Online: round-trip the auth message to the server.
+        # Online: send auth request; server checks the DB for the username
+        # and verifies the password hash.
         try:
             created = client.authenticate(username, password)
         except AIClientError as exc:
             msg = str(exc)
-            # The server returns "incorrect password" verbatim for wrong
-            # credentials; treat anything else as a transport problem
-            # and surface it without retry-pressure.
             if "incorrect password" in msg:
-                error_msg = "Incorrect password. Try again."
+                error_msg = "Wrong password, try again."
+            elif "username" in msg and "not" in msg:
+                error_msg = "Username not found. Did you mean to sign up?"
             else:
                 error_msg = f"Server error: {msg}"
             continue
 
+        if created:
+            # Should not happen on the login path, but handle gracefully.
+            error_msg = "No existing account found. Please use Sign Up."
+            continue
+
         state["username"] = username
         state["logged_in"] = True
-        msg = "Account created!" if created else "Signed in!"
-        safe_addstr(stdscr, by + 7, bx + 3, msg,
+        safe_addstr(stdscr, by + 7, bx + 3, "Signed in!",
+                    curses.color_pair(C_SUCCESS) | curses.A_BOLD)
+        stdscr.refresh()
+        time.sleep(0.7)
+        state["current_screen"] = "main"
+        return
+
+
+def screen_signup(stdscr):
+    """
+    Sign-up screen — creates a new account in the DB.
+
+    If the username already exists the error is shown and the user is
+    asked to choose a different name. If the server is unreachable,
+    the account is accepted locally so the TUI remains demoable.
+    """
+    error_msg = ""
+
+    while True:
+        stdscr.clear()
+        h, w = stdscr.getmaxyx()
+        draw_header(stdscr, "Sign Up")
+        draw_footer(stdscr, ["Enter to confirm", "Ctrl+C to quit"])
+
+        center_text(stdscr, 2, "Create your account",
+                    curses.color_pair(C_ACCENT) | curses.A_BOLD)
+        center_text(stdscr, 3, "Choose a username and password",
+                    curses.color_pair(C_DIM) | curses.A_DIM)
+
+        bw, bh = 52, 14
+        bx = max(0, (w - bw) // 2)
+        by = max(1, (h - bh) // 2)
+        draw_box(stdscr, by, bx, bh, bw, "Sign Up")
+
+        safe_addstr(stdscr, by + 2, bx + 3, "Username:", curses.color_pair(C_ACCENT))
+        safe_addstr(stdscr, by + 5, bx + 3, "Password:", curses.color_pair(C_ACCENT))
+        safe_addstr(stdscr, by + 8, bx + 3, "Confirm password:", curses.color_pair(C_ACCENT))
+
+        client = state.get("ai_client")
+        if client is None:
+            safe_addstr(stdscr, by + 11, bx + 3,
+                        "(offline -- account saved locally)",
+                        curses.color_pair(C_DIM) | curses.A_DIM)
+
+        if error_msg:
+            safe_addstr(stdscr, by + 12, bx + 3, error_msg[:bw - 6],
+                        curses.color_pair(C_ERROR) | curses.A_BOLD)
+
+        stdscr.refresh()
+
+        username = read_line(stdscr, by + 3, bx + 3, bw - 6).strip()
+        password = read_line(stdscr, by + 6, bx + 3, bw - 6, mask=True)
+        confirm  = read_line(stdscr, by + 9, bx + 3, bw - 6, mask=True)
+
+        if not username or not password:
+            error_msg = "Username and password are required."
+            continue
+
+        if password != confirm:
+            error_msg = "Passwords do not match. Try again."
+            continue
+
+        # Offline mode: accept locally.
+        if client is None:
+            state["username"] = username
+            state["logged_in"] = True
+            safe_addstr(stdscr, by + 10, bx + 3, "Account created (offline)!",
+                        curses.color_pair(C_SUCCESS) | curses.A_BOLD)
+            stdscr.refresh()
+            time.sleep(0.7)
+            state["current_screen"] = "main"
+            return
+
+        # Online: send auth request; server will create the account if the
+        # username does not already exist, or reject it if it does.
+        try:
+            created = client.authenticate(username, password)
+        except AIClientError as exc:
+            msg = str(exc)
+            if "already taken" in msg or "already exists" in msg:
+                error_msg = "Username already taken. Choose another."
+            elif "incorrect password" in msg:
+                # Username exists but password differs — means someone
+                # already registered it.
+                error_msg = "Username already exists with a different password."
+            else:
+                error_msg = f"Server error: {msg}"
+            continue
+
+        if not created:
+            # Server said the user already existed and password matched —
+            # that means sign-up was attempted with an existing account.
+            error_msg = "Username already exists. Please log in instead."
+            continue
+
+        state["username"] = username
+        state["logged_in"] = True
+        safe_addstr(stdscr, by + 10, bx + 3, "Account created!",
                     curses.color_pair(C_SUCCESS) | curses.A_BOLD)
         stdscr.refresh()
         time.sleep(0.7)
@@ -520,7 +659,11 @@ def main(stdscr):
     init_colors()
 
     try:
-        screen_login(stdscr)
+        choice = screen_auth_choice(stdscr)
+        if choice == "login":
+            screen_login(stdscr)
+        else:
+            screen_signup(stdscr)
         screen_main(stdscr)
     except KeyboardInterrupt:
         pass
