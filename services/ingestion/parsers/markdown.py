@@ -2,7 +2,7 @@
 MarkdownParser — DocumentParser[Document] implementation for Markdown .md files.
 
 Responsibilities:
-  - Read a .md file from disk.
+  - Decode raw file bytes received from the client over the wire.
   - Strip Markdown syntax (headings, emphasis, links, images, code fences,
     blockquotes, horizontal rules, HTML tags) to produce clean plain text.
   - Normalise whitespace (collapse blank lines, strip trailing spaces).
@@ -10,19 +10,25 @@ Responsibilities:
 
 This parser intentionally does NO chunking — that is ChunkingObserver's job.
 The parser only extracts the full plain-text content and populates metadata.
+
+Network architecture note:
+    The server never sees the client's local disk. The TUI reads the file
+    locally, sends raw bytes + filename over the persistent socket, and
+    this parser receives those bytes directly. There is no filesystem
+    access in this module.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import re
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import ClassVar
 
 from services.shared.domain import Document, DocumentStatus
-from services.shared.exceptions import RAGException
+from services.shared.exceptions import RAGException, UnsupportedFormatError
 
 logger = logging.getLogger(__name__)
 
@@ -83,12 +89,15 @@ class MarkdownParser:
 
     # DocumentParser[Document] interface
 
-    def parse(self, path: Path) -> Document:
+    def parse(self, raw: bytes | bytearray, filename: str) -> Document:
         """
-        Read *path* and return a shared.domain.Document.
+        Decode *raw* bytes and return a shared.domain.Document.
 
         Args:
-            path: Absolute or relative path to a .md file.
+            raw:      The raw file bytes as received from the client.
+            filename: The original filename supplied by the client (used
+                      to validate the extension and to populate
+                      Document.filename).
 
         Returns:
             A shared.domain.Document with content set to the
@@ -96,32 +105,31 @@ class MarkdownParser:
 
         Raises:
             shared.exceptions.UnsupportedFormatError:
-                if the file extension is not .md, .markdown, .mkd, .mkdn, or .mdown
+                if the filename's extension is not one of
+                .md, .markdown, .mkd, .mkdn, .mdown
             shared.exceptions.RAGException:
-                for any I/O or unexpected error.
+                for any decoding or unexpected error.
         """
-        if not path.exists():
-            raise RAGException(f"File does not exist: {path}")
+        if not isinstance(raw, (bytes, bytearray)):
+            raise RAGException(
+                f"MarkdownParser.parse expected bytes, got {type(raw).__name__}"
+            )
 
-        if not path.is_file():
-            raise RAGException(f"Path is not a regular file: {path}")
-
-        if path.suffix[1:].lower() not in _SUPPORTED:
-            from services.shared.exceptions import UnsupportedFormatError
-
+        ext = _extension(filename)
+        if ext not in _SUPPORTED:
             raise UnsupportedFormatError(
-                f"MarkdownParser does not handle '{path.suffix}' files. "
+                f"MarkdownParser does not handle '.{ext}' files. "
                 f"Supported: {self.extensions}"
             )
 
-        logger.debug("MarkdownParser: reading '%s'", path)
-        raw = self._read_file(path)
-        stripped = self._strip_markdown(raw)
+        logger.debug("MarkdownParser: decoding '%s' (%d bytes)", filename, len(raw))
+        text = self._decode(bytes(raw), filename)
+        stripped = self._strip_markdown(text)
         content = self._normalise(stripped)
 
         logger.info(
             "MarkdownParser: parsed '%s' — %d chars, %d lines",
-            path.name,
+            filename,
             len(content),
             content.count("\n"),
         )
@@ -134,20 +142,19 @@ class MarkdownParser:
                 int=0
             ),  # 0 is an invalid user ID, to be replaced later in the ingestion flow
             content=content,
-            filename=path.name,
+            filename=filename,
             uploaded_at=datetime.now(tz=timezone.utc),
-            content_type="text/markdown",
             status=DocumentStatus.PARSED,
         )
 
     # Private helpers
     @staticmethod
-    def _read_file(path: Path) -> str:
+    def _decode(raw: bytes, filename: str) -> str:
         """
-        Read *path* trying multiple encodings in order.
+        Decode *raw* trying multiple encodings in order.
 
         Raises:
-            shared.exceptions.RAGException: wraps any OSError or encoding failure.
+            shared.exceptions.RAGException: if every supported encoding fails.
         """
         encodings = ("utf-8", "utf-8-sig", "utf-16", "cp1252", "latin-1")
 
@@ -155,19 +162,18 @@ class MarkdownParser:
 
         for encoding in encodings:
             try:
-                return path.read_text(encoding=encoding)
+                return raw.decode(encoding)
             except UnicodeDecodeError as e:
                 last_error = e
                 logger.debug(
                     "MarkdownParser: decode failed for '%s' with encoding '%s', trying next encoding.",
-                    path,
+                    filename,
                     encoding,
                 )
                 continue
 
-        # If we exhausted all encodings, raise an error.
         raise RAGException(
-            f"MarkdownParser: unable to decode '{path}' with supported encodings"
+            f"MarkdownParser: unable to decode '{filename}' with supported encodings"
         ) from last_error
 
     @staticmethod
@@ -259,3 +265,16 @@ class MarkdownParser:
 
         result = "\n".join(normalised)
         return result if result.endswith("\n") else result + "\n"
+
+
+def _extension(filename: str) -> str:
+    """
+    Lower-case extension *without* the leading dot.
+
+    Uses os.path.basename so a client that includes a leading directory
+    component (which is metadata, never used for I/O) does not throw off
+    extension detection.
+    """
+    base = os.path.basename(filename)
+    _, dot_ext = os.path.splitext(base)
+    return dot_ext.lstrip(".").lower()

@@ -94,9 +94,7 @@ def empty_event() -> IngestionEvent:
 
 
 class TestSuccessfulStorage:
-    def test_delegates_to_store(
-        self, store: MagicMock, event: IngestionEvent
-    ) -> None:
+    def test_delegates_to_store(self, store: MagicMock, event: IngestionEvent) -> None:
         observer = StorageObserver(store)
         observer.on_ingest(event)
 
@@ -157,18 +155,14 @@ class TestEmptyEvent:
 
 
 class TestMissingEmbeddings:
-    def test_missing_embedding_raises_storage_error(
-        self, store: MagicMock
-    ) -> None:
+    def test_missing_embedding_raises_storage_error(self, store: MagicMock) -> None:
         event = _make_event(3, with_embeddings=False)
         observer = StorageObserver(store)
 
         with pytest.raises(StorageError, match="no embedding"):
             observer.on_ingest(event)
 
-    def test_missing_embedding_marks_event_failed(
-        self, store: MagicMock
-    ) -> None:
+    def test_missing_embedding_marks_event_failed(self, store: MagicMock) -> None:
         event = _make_event(3, with_embeddings=False)
         observer = StorageObserver(store)
 
@@ -179,9 +173,7 @@ class TestMissingEmbeddings:
         assert event.error_message is not None
         assert "embedding" in event.error_message.lower()
 
-    def test_missing_embedding_skips_store_call(
-        self, store: MagicMock
-    ) -> None:
+    def test_missing_embedding_skips_store_call(self, store: MagicMock) -> None:
         event = _make_event(3, with_embeddings=False)
         observer = StorageObserver(store)
 
@@ -190,9 +182,7 @@ class TestMissingEmbeddings:
 
         store.store.assert_not_called()
 
-    def test_partial_missing_embedding_raises(
-        self, store: MagicMock
-    ) -> None:
+    def test_partial_missing_embedding_raises(self, store: MagicMock) -> None:
         """Some chunks have embeddings, some don't — still a hard error."""
         event = _make_event(3, with_embeddings=True)
         event.chunks[1].embedding = []  # clear one embedding
@@ -210,18 +200,14 @@ class TestMissingEmbeddings:
 class TestStoreFailures:
     def test_storage_error_propagates(self, event: IngestionEvent) -> None:
         store = MagicMock()
-        store.store = MagicMock(
-            side_effect=StorageError("mongo write timed out")
-        )
+        store.store = MagicMock(side_effect=StorageError("mongo write timed out"))
 
         observer = StorageObserver(store)
 
         with pytest.raises(StorageError, match="mongo write timed out"):
             observer.on_ingest(event)
 
-    def test_storage_error_marks_event_failed(
-        self, event: IngestionEvent
-    ) -> None:
+    def test_storage_error_marks_event_failed(self, event: IngestionEvent) -> None:
         store = MagicMock()
         store.store = MagicMock(side_effect=StorageError("disk full"))
 

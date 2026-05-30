@@ -8,7 +8,6 @@ Run with:
 from __future__ import annotations
 
 import uuid
-from pathlib import Path
 
 import pytest
 
@@ -27,27 +26,23 @@ def parser() -> TxtParser:
 
 
 @pytest.fixture
-def txt_file(tmp_path: Path) -> Path:
-    """A representative .txt file with multi-line content."""
-    p = tmp_path / "notes.txt"
-    p.write_text("Line one\nLine two\nLine three\n", encoding="utf-8")
-    return p
+def txt_bytes() -> bytes:
+    """A representative .txt payload with multi-line content."""
+    return "Line one\nLine two\nLine three\n".encode("utf-8")
 
 
 @pytest.fixture
-def plain_txt(tmp_path: Path) -> Path:
-    """Minimal .txt file with just plain text."""
-    p = tmp_path / "plain.txt"
-    p.write_text("Hello world.\n", encoding="utf-8")
-    return p
+def plain_bytes() -> bytes:
+    """Minimal .txt payload with just plain text."""
+    return "Hello world.\n".encode("utf-8")
 
 
 # Basic parsing
 
 
 class TestTxtParserBasic:
-    def test_returns_document(self, parser: TxtParser, txt_file: Path) -> None:
-        result = parser.parse(txt_file)
+    def test_returns_document(self, parser: TxtParser, txt_bytes: bytes) -> None:
+        result = parser.parse(txt_bytes, "notes.txt")
 
         assert isinstance(result, Document)
         assert isinstance(result.id, uuid.UUID)
@@ -55,28 +50,35 @@ class TestTxtParserBasic:
         assert result.user_id == uuid.UUID(int=0)
         assert len(result.content) > 0
 
-    def test_content_ends_with_newline(self, parser: TxtParser, txt_file: Path) -> None:
-        doc = parser.parse(txt_file)
+    def test_content_ends_with_newline(
+        self, parser: TxtParser, txt_bytes: bytes
+    ) -> None:
+        doc = parser.parse(txt_bytes, "notes.txt")
         assert doc.content.endswith("\n")
 
-    def test_plain_txt_round_trip(self, parser: TxtParser, plain_txt: Path) -> None:
-        doc = parser.parse(plain_txt)
+    def test_plain_txt_round_trip(self, parser: TxtParser, plain_bytes: bytes) -> None:
+        doc = parser.parse(plain_bytes, "plain.txt")
         assert "Hello world." in doc.content
 
-    def test_content_matches_file(self, parser: TxtParser, txt_file: Path) -> None:
-        doc = parser.parse(txt_file)
+    def test_content_matches_payload(self, parser: TxtParser, txt_bytes: bytes) -> None:
+        doc = parser.parse(txt_bytes, "notes.txt")
         assert "Line one" in doc.content
         assert "Line two" in doc.content
         assert "Line three" in doc.content
 
-    def test_id_is_uuid(self, parser: TxtParser, txt_file: Path) -> None:
-        doc = parser.parse(txt_file)
+    def test_id_is_uuid(self, parser: TxtParser, txt_bytes: bytes) -> None:
+        doc = parser.parse(txt_bytes, "notes.txt")
         assert isinstance(doc.id, uuid.UUID)
 
-    def test_user_id_is_nil_sentinel(self, parser: TxtParser, txt_file: Path) -> None:
+    def test_user_id_is_nil_sentinel(self, parser: TxtParser, txt_bytes: bytes) -> None:
         # TxtParser sets a nil UUID; IngestionService replaces it later.
-        doc = parser.parse(txt_file)
+        doc = parser.parse(txt_bytes, "notes.txt")
         assert doc.user_id == uuid.UUID(int=0)
+
+    def test_bytearray_accepted(self, parser: TxtParser) -> None:
+        """parse() accepts both bytes and bytearray for caller flexibility."""
+        doc = parser.parse(bytearray(b"hi there\n"), "hi.txt")
+        assert "hi there" in doc.content
 
 
 # Extension declarations
@@ -100,27 +102,17 @@ class TestTxtParserExtensions:
 
 
 class TestTxtParserNormalisation:
-    def test_trailing_spaces_stripped(self, parser: TxtParser, tmp_path: Path) -> None:
-        f = tmp_path / "notes.txt"
-        f.write_text("line one   \nline two\t\t\n", encoding="utf-8")
-        doc = parser.parse(f)
+    def test_trailing_spaces_stripped(self, parser: TxtParser) -> None:
+        doc = parser.parse(b"line one   \nline two\t\t\n", "notes.txt")
         for line in doc.content.splitlines():
             assert line == line.rstrip(), f"Trailing whitespace found: {line!r}"
 
-    def test_excessive_blank_lines_collapsed(
-        self, parser: TxtParser, tmp_path: Path
-    ) -> None:
-        f = tmp_path / "notes.txt"
-        f.write_text("a\n\n\n\n\nb\n", encoding="utf-8")
-        doc = parser.parse(f)
+    def test_excessive_blank_lines_collapsed(self, parser: TxtParser) -> None:
+        doc = parser.parse(b"a\n\n\n\n\nb\n", "notes.txt")
         assert "\n\n\n" not in doc.content
 
-    def test_empty_file_produces_single_newline(
-        self, parser: TxtParser, tmp_path: Path
-    ) -> None:
-        f = tmp_path / "empty.txt"
-        f.write_text("", encoding="utf-8")
-        doc = parser.parse(f)
+    def test_empty_payload_produces_single_newline(self, parser: TxtParser) -> None:
+        doc = parser.parse(b"", "empty.txt")
         assert doc.content == "\n"
 
 
@@ -128,23 +120,17 @@ class TestTxtParserNormalisation:
 
 
 class TestTxtParserEncoding:
-    def test_latin1_file(self, parser: TxtParser, tmp_path: Path) -> None:
-        f = tmp_path / "legacy.txt"
+    def test_latin1_payload(self, parser: TxtParser) -> None:
         # 0xe9 ('é' in latin-1) is invalid as standalone UTF-8.
-        f.write_bytes(b"caf\xe9\n")
-        doc = parser.parse(f)
-        assert "caf" in doc.content  # read without crashing
+        doc = parser.parse(b"caf\xe9\n", "legacy.txt")
+        assert "caf" in doc.content  # decoded without crashing
 
-    def test_utf8_bom(self, parser: TxtParser, tmp_path: Path) -> None:
-        f = tmp_path / "bom.txt"
-        f.write_bytes(b"\xef\xbb\xbfhello\n")
-        doc = parser.parse(f)
+    def test_utf8_bom(self, parser: TxtParser) -> None:
+        doc = parser.parse(b"\xef\xbb\xbfhello\n", "bom.txt")
         assert "hello" in doc.content
 
-    def test_utf16(self, parser: TxtParser, tmp_path: Path) -> None:
-        f = tmp_path / "wide.txt"
-        f.write_bytes("hello world\n".encode("utf-16"))
-        doc = parser.parse(f)
+    def test_utf16(self, parser: TxtParser) -> None:
+        doc = parser.parse("hello world\n".encode("utf-16"), "wide.txt")
         assert "hello world" in doc.content
 
 
@@ -152,25 +138,23 @@ class TestTxtParserEncoding:
 
 
 class TestTxtParserErrors:
-    def test_missing_file_raises(self, parser: TxtParser, tmp_path: Path) -> None:
-        with pytest.raises(RAGException, match="does not exist"):
-            parser.parse(tmp_path / "nonexistent.txt")
-
-    def test_directory_raises(self, parser: TxtParser, tmp_path: Path) -> None:
-        with pytest.raises(RAGException, match="not a regular file"):
-            parser.parse(tmp_path)
-
-    def test_wrong_extension_raises(self, parser: TxtParser, tmp_path: Path) -> None:
-        f = tmp_path / "notes.md"
-        f.write_text("# heading\n", encoding="utf-8")
+    def test_wrong_extension_raises(self, parser: TxtParser) -> None:
         with pytest.raises(UnsupportedFormatError, match="does not handle"):
-            parser.parse(f)
+            parser.parse(b"# heading\n", "notes.md")
 
-    def test_wrong_extension_pdf(self, parser: TxtParser, tmp_path: Path) -> None:
-        f = tmp_path / "notes.pdf"
-        f.write_text("fake pdf\n", encoding="utf-8")
+    def test_wrong_extension_pdf(self, parser: TxtParser) -> None:
         with pytest.raises(UnsupportedFormatError):
-            parser.parse(f)
+            parser.parse(b"fake pdf\n", "notes.pdf")
+
+    def test_non_bytes_raises(self, parser: TxtParser) -> None:
+        """parse() guards against accidental str input."""
+        with pytest.raises(RAGException, match="expected bytes"):
+            parser.parse("not bytes", "notes.txt")  # type: ignore[arg-type]
+
+    def test_filename_with_path_component(self, parser: TxtParser) -> None:
+        """A client that includes a leading dir should still get its extension parsed."""
+        doc = parser.parse(b"hi\n", "subdir/notes.txt")
+        assert isinstance(doc, Document)
 
 
 # ParserRegistry integration
