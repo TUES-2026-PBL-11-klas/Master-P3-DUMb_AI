@@ -84,6 +84,40 @@ def fetch_ai_response(text: str) -> str:
         return f"[connection lost] {exc}  (falling back to offline stub)"
 
 
+def normalize_input_path(raw: str | None) -> str:
+    """
+    Clean up a path the way a user is likely to have typed or pasted it.
+
+    Handles the common Windows + cross-platform footguns:
+      - Surrounding double or single quotes (from File Explorer's
+        "Copy as path" or PowerShell tab completion).
+      - Leading / trailing whitespace.
+      - A ``~`` for the home directory.
+      - Mixed slashes (normpath collapses them).
+
+    Returns the cleaned path. Does NOT check existence — that's
+    upload_file_to_server's job.
+    """
+    if raw is None:
+        return ""
+
+    path = raw.strip()
+
+    # Strip a single matching pair of surrounding quotes (single or double).
+    if len(path) >= 2 and path[0] == path[-1] and path[0] in ('"', "'"):
+        path = path[1:-1].strip()
+
+    # ~/notes.txt -> $HOME/notes.txt (or %USERPROFILE% on Windows).
+    if path.startswith("~"):
+        path = os.path.expanduser(path)
+
+    # Collapse "//" and ".." segments, normalise slash direction.
+    if path:
+        path = os.path.normpath(path)
+
+    return path
+
+
 def upload_file_to_server(path: str) -> tuple[bool, str]:
     """
     Read *path* from local disk, send the bytes to the server, and return
@@ -697,7 +731,8 @@ def screen_documents(stdscr: curses.window) -> None:
                 stdscr, h - 6, 2, "File path to upload:", curses.color_pair(C_ACCENT)
             )
             stdscr.refresh()
-            path = read_line(stdscr, h - 5, 2, w - 4).strip()
+            raw_input = read_line(stdscr, h - 5, 2, w - 4)
+            path = normalize_input_path(raw_input)
             if path and os.path.isfile(path):
                 # Show a transient status while we read + ship the bytes.
                 safe_addstr(stdscr, h - 4, 2, " " * (w - 4))
@@ -713,6 +748,8 @@ def screen_documents(stdscr: curses.window) -> None:
                 ok, msg = upload_file_to_server(path)
                 msg_attr = C_SUCCESS if ok else C_ERROR
             elif path:
+                # Show the cleaned-up path so the user can see why we
+                # disagree with them (e.g. quotes were stripped).
                 msg = f"File not found: {path}"
                 msg_attr = C_ERROR
             else:
