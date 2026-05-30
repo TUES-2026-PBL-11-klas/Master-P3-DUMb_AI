@@ -36,7 +36,7 @@ if __package__ in (None, ""):
 
 from client.ai_client import AIClient, AIClientError, MAX_UPLOAD_BYTES
 
-# ── In-memory state ─────────────────────────────────────────────────────────
+# In-memory state
 state: dict[str, Any] = {
     "logged_in": False,
     "username": "",
@@ -190,7 +190,7 @@ C_USER_MSG = 7
 C_AI_MSG = 8
 
 
-# ── Safe wrappers ────────────────────────────────────────────────────────────
+# Safe wrappers
 def safe_curs_set(v: int) -> None:
     try:
         curses.curs_set(v)
@@ -233,7 +233,7 @@ def init_colors() -> None:
     curses.init_pair(C_AI_MSG, curses.COLOR_YELLOW, bg)
 
 
-# ── Drawing helpers ──────────────────────────────────────────────────────────
+# Drawing helpers
 def draw_header(win: curses.window, title: str) -> None:
     h, w = win.getmaxyx()
     text = f"  DocChat  --  {title}  "
@@ -875,7 +875,8 @@ def screen_chat(stdscr: curses.window) -> None:
             input_buf += chr(ch)
 
 
-# ── Entry point ──────────────────────────────────────────────────────────────
+# Entry point
+
 
 
 def main(stdscr: curses.window) -> None:

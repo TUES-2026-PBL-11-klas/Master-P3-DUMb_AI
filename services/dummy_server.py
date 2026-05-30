@@ -97,7 +97,7 @@ DEFAULT_PORT = 5555
 MIN_THINK_SECONDS = 0.2
 MAX_THINK_SECONDS = 0.8
 
-# Hard upload size cap — mirrors Section 4.2 of the project reference
+# Hard upload size cap
 # ("Hard upload size cap (default: 5 MB per file)").
 MAX_UPLOAD_BYTES = 5 * 1024 * 1024  # 5 MB
 

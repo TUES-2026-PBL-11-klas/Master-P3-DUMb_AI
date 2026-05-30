@@ -13,6 +13,7 @@ Wire protocol (see services.dummy_server for the server side):
         {"type": "logout"}
         {"type": "query",  "text": <str>}            # session-authenticated
         {"type": "upload", "filename": <str>,        # session-authenticated
+
                            "bytes_b64": <base64 str>}
 
     Server -> Client:
