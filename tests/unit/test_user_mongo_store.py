@@ -38,7 +38,7 @@ def _user_doc(**overrides: Any) -> dict[str, Any]:
     base = {
         "id": str(uuid.uuid4()),
         "username": "alice",
-        "password_hash": "scrypt$...$...",
+        "password_hash": "scrypt$...$...",  # pragma: allowlist secret
         "created_at": datetime(2026, 1, 1, tzinfo=timezone.utc),
     }
     base.update(overrides)
@@ -68,7 +68,7 @@ def test_find_by_username_maps_doc_to_useracc() -> None:
     assert isinstance(user, UserAcc)
     assert user.id == user_id
     assert user.username == "alice"
-    assert user.password_hash == "scrypt$...$..."
+    assert user.password_hash == "scrypt$...$..."  # pragma: allowlist secret
 
 
 def test_find_by_username_empty_skips_db() -> None:
@@ -101,14 +101,14 @@ def test_create_inserts_expected_doc_and_returns_useracc() -> None:
 
     assert isinstance(user, UserAcc)
     assert user.username == "alice"
-    assert user.password_hash == "scrypt$hash"
+    assert user.password_hash == "scrypt$hash"  # pragma: allowlist secret
     assert isinstance(user.id, uuid.UUID)
     assert user.created_at.tzinfo is not None  # tz-aware
 
     col.insert_one.assert_called_once()
     inserted = col.insert_one.call_args.args[0]
     assert inserted["username"] == "alice"
-    assert inserted["password_hash"] == "scrypt$hash"
+    assert inserted["password_hash"] == "scrypt$hash"  # pragma: allowlist secret
     assert inserted["id"] == str(user.id)
     assert inserted["created_at"] == user.created_at
 

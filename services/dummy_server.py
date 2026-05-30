@@ -11,22 +11,55 @@ Protocol
 Every message is a single JSON object terminated by a newline (``\\n``).
 
 Client -> Server:
-    {"type": "auth",   "username": "<str>", "password": "<str>"}
-    {"type": "query",  "username": "<str>", "text": "<str>"}
     {"type": "ping"}
+    {"type": "login",  "username": "<str>", "password": "<str>"}
+    {"type": "signup", "username": "<str>", "password": "<str>"}
+    {"type": "logout"}                              # optional; ends the session
+    {"type": "query",  "text": "<str>"}             # session-authenticated
+    {"type": "upload", "filename": "<str>",         # session-authenticated
+                       "bytes_b64": "<base64 str>"}
 
 Server -> Client:
-    {"type": "auth_ok",    "username": "<str>", "created": <bool>}
-                                                   # created=True if the
-                                                   # account was just
-                                                   # added; False if it
-                                                   # already existed and
-                                                   # the password matched.
-    {"type": "answer", "text": "<str>"}            # reply to "query"
-    {"type": "pong"}                               # reply to "ping"
-    {"type": "error",  "message": "<str>"}         # malformed request OR
-                                                   # auth failure (wrong
-                                                   # password)
+    {"type": "pong"}
+    {"type": "auth_ok",    "username": "<str>"}     # reply to login / signup
+    {"type": "logout_ok"}
+    {"type": "answer",     "text": "<str>"}         # reply to query
+    {"type": "upload_ack", "filename": "<str>", "size": <int>}
+    {"type": "error",      "message": "<str>"}      # malformed request,
+                                                    # auth failure, missing
+                                                    # session, or upload
+                                                    # rejection.
+
+Session model:
+    The connection IS the session. login or signup binds a UserAcc to the
+    handler instance; query and upload check that binding and refuse
+    otherwise ("not authenticated"). When the socket closes, the session
+    evaporates. There are no tokens — the client only needs to know it
+    must call login or signup before query / upload.
+
+    Multiple logins on the same connection are allowed; the most recent
+    wins (useful for "switch user" without dropping the connection).
+
+Auth design notes:
+    - login and signup are separate intents on the wire. A find-or-create
+      endpoint silently turns a typo on the login screen into a permanent
+      new account; the split makes intent explicit.
+    - login does NOT distinguish "user not found" from "incorrect
+      password" on the wire — both surface as "invalid credentials" so an
+      attacker can't enumerate accounts via the error channel. The login
+      path also always runs scrypt (against a dummy hash if the user is
+      missing) so the timing channel doesn't leak either.
+    - signup necessarily reveals whether a username is taken — there is
+      no way to let the user pick a different name otherwise. The
+      mitigation for that is rate limiting at the transport layer, not
+      message wording.
+
+Upload design note:
+    The upload handler is intentionally a *stub* — it validates the
+    message shape, base64-decodes the payload, checks the size cap and
+    the allow-list of extensions, and returns an ack. It does NOT yet
+    feed the bytes into IngestionService (parser → chunk → embed →
+    store). Wiring that up is the next step; the protocol is stable.
 
 Run it
 ------
@@ -38,6 +71,8 @@ Run it
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import hashlib
 import hmac
 import json
@@ -54,13 +89,28 @@ from typing import Any, Protocol
 from services.shared.domain import UserAcc
 from services.shared.exceptions import AuthError, StorageError
 
-# ── Configuration ────────────────────────────────────────────────────────────
+# Configuration
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 5555
 
 # Simulated "thinking" delay so the UI feels like it's talking to a real model.
 MIN_THINK_SECONDS = 0.2
 MAX_THINK_SECONDS = 0.8
+
+# Hard upload size cap — mirrors Section 4.2 of the project reference
+# ("Hard upload size cap (default: 5 MB per file)").
+MAX_UPLOAD_BYTES = 5 * 1024 * 1024  # 5 MB
+
+# Extensions the server will accept. In the wired-up server this comes from
+# ParserRegistry.supported_extensions; the stub hard-codes the same set so
+# the TUI gets the same early-rejection behaviour.
+SUPPORTED_EXTENSIONS: frozenset[str] = frozenset(
+    {"txt", "md", "markdown", "mkd", "mkdn", "mdown"}
+)
+
+# Single message the wire returns for any login failure. Never include the
+# specific reason here — see the auth design note in the module docstring.
+_INVALID_CREDENTIALS = "invalid credentials"
 
 DUMMY_RESPONSES = [
     "Based on the documents you uploaded, the short answer is: yes, but with caveats.",
@@ -78,7 +128,7 @@ DUMMY_RESPONSES = [
 logger = logging.getLogger("dummy_server")
 
 
-# ── User store plumbing ──────────────────────────────────────────────────────
+# User store plumbing
 #
 # The handler talks to "something that looks like a user store" via a tiny
 # structural Protocol. Production code injects a MongoUserStore; tests can
@@ -137,7 +187,7 @@ def set_user_store(store: _UserStore) -> None:
     _user_store = store
 
 
-# ── Password hashing ─────────────────────────────────────────────────────────
+# Password hashing
 #
 # scrypt is in the stdlib (since 3.6) and is a memory-hard KDF designed for
 # password storage. We store a self-describing string so we can change the
@@ -147,7 +197,7 @@ def set_user_store(store: _UserStore) -> None:
 #
 # Verification uses hmac.compare_digest to avoid timing leaks.
 
-_SCRYPT_N = 2 ** 14   # CPU/memory cost — ~16 MB of work per hash
+_SCRYPT_N = 2**14  # CPU/memory cost — ~16 MB of work per hash
 _SCRYPT_R = 8
 _SCRYPT_P = 1
 _SCRYPT_DKLEN = 32
@@ -160,7 +210,10 @@ def _hash_password(password: str) -> str:
     dk = hashlib.scrypt(
         password.encode("utf-8"),
         salt=salt,
-        n=_SCRYPT_N, r=_SCRYPT_R, p=_SCRYPT_P, dklen=_SCRYPT_DKLEN,
+        n=_SCRYPT_N,
+        r=_SCRYPT_R,
+        p=_SCRYPT_P,
+        dklen=_SCRYPT_DKLEN,
         maxmem=64 * 1024 * 1024,
     )
     return f"scrypt${_SCRYPT_N}${_SCRYPT_R}${_SCRYPT_P}${salt.hex()}${dk.hex()}"
@@ -183,7 +236,11 @@ def _verify_password(password: str, stored: str) -> bool:
     try:
         dk = hashlib.scrypt(
             password.encode("utf-8"),
-            salt=salt, n=n, r=r, p=p, dklen=len(expected),
+            salt=salt,
+            n=n,
+            r=r,
+            p=p,
+            dklen=len(expected),
             maxmem=64 * 1024 * 1024,
         )
     except ValueError:
@@ -191,17 +248,41 @@ def _verify_password(password: str, stored: str) -> bool:
     return hmac.compare_digest(dk, expected)
 
 
-def _authenticate(username: str, password: str) -> tuple[UserAcc, bool]:
-    """
-    Find-or-create the user and verify the password.
+# Dummy hash used when the requested username does not exist. We still
+# run _verify_password against it so the login code path spends the same
+# scrypt time whether the user exists or not — closing the timing
+# side-channel that would otherwise let an attacker enumerate accounts.
+#
+# Lazy-built once on first miss; the value is intentionally NOT bound to
+# any real password (it's the hash of 32 random bytes that nobody knows).
+_DUMMY_HASH: str | None = None
+_DUMMY_HASH_LOCK = threading.Lock()
 
-    Returns (user, created) where ``created`` is True if a new account was
-    just inserted, False if the user already existed and the password
-    matched.
+
+def _dummy_hash() -> str:
+    global _DUMMY_HASH
+    if _DUMMY_HASH is None:
+        with _DUMMY_HASH_LOCK:
+            if _DUMMY_HASH is None:
+                _DUMMY_HASH = _hash_password(secrets.token_hex(32))
+    return _DUMMY_HASH
+
+
+def _login(username: str, password: str) -> UserAcc:
+    """
+    Look up *username* and verify *password*.
+
+    On the unhappy paths (unknown user OR wrong password) the function
+    raises AuthError("invalid credentials") — a single message — and
+    always runs one scrypt verification, so the wire response and the
+    handler's response time both reveal nothing about whether the
+    username exists.
 
     Raises:
-        AuthError: if the username exists but the password is wrong, or
-                   if the input is empty.
+        AuthError: on any auth failure or empty input. Input-validation
+                   errors ("username must not be empty") are kept
+                   specific because they're about the request shape, not
+                   the user record.
         StorageError: surfaced as-is from the user store.
     """
     if not username:
@@ -210,28 +291,87 @@ def _authenticate(username: str, password: str) -> tuple[UserAcc, bool]:
         raise AuthError("password must not be empty")
 
     existing = _user_store.find_by_username(username)
-    if existing is not None:
-        if not _verify_password(password, existing.password_hash):
-            raise AuthError("incorrect password")
-        return existing, False
+    if existing is None:
+        # Burn the same scrypt cycles we'd spend on a real verify so the
+        # response time doesn't distinguish "user not found" from "wrong
+        # password". The result is discarded.
+        _verify_password(password, _dummy_hash())
+        raise AuthError(_INVALID_CREDENTIALS)
 
-    # New account — hash the password before it ever touches the store.
-    user = _user_store.create(username, _hash_password(password))
-    return user, True
+    if not _verify_password(password, existing.password_hash):
+        raise AuthError(_INVALID_CREDENTIALS)
+
+    return existing
 
 
-# ── Handler ──────────────────────────────────────────────────────────────────
+def _signup(username: str, password: str) -> UserAcc:
+    """
+    Create a brand-new account for *username* with *password*.
+
+    Note that signup necessarily reveals whether a username is taken —
+    we cannot ask the user to pick a different name otherwise. See the
+    module docstring for the rationale.
+
+    Raises:
+        AuthError: if the input is empty or the username already exists.
+        StorageError: surfaced as-is from the user store on any other
+                      backend failure.
+    """
+    if not username:
+        raise AuthError("username must not be empty")
+    if not password:
+        raise AuthError("password must not be empty")
+
+    # Pre-check returns a cleaner error and avoids a wasted scrypt hash
+    # on the common "username taken" case.
+    if _user_store.find_by_username(username) is not None:
+        raise AuthError("username already taken")
+
+    try:
+        return _user_store.create(username, _hash_password(password))
+    except StorageError as exc:
+        # Race: another connection inserted the same username between our
+        # find_by_username() and create() calls. Surface as AuthError so
+        # the client sees a consistent message.
+        if "already taken" in str(exc):
+            raise AuthError("username already taken") from exc
+        raise
+
+
+# Handler
 class _DummyAIHandler(socketserver.StreamRequestHandler):
-    """One instance per client connection. Reads NDJSON, writes NDJSON."""
+    """
+    One instance per client connection. Reads NDJSON, writes NDJSON.
+
+    Per-connection session: ``self._user`` is None until login or signup
+    succeeds, then holds the authenticated UserAcc for the rest of the
+    connection. query and upload require this; everything else does not.
+    """
 
     # Make sure a slow client doesn't hang the server forever.
     timeout = 300  # seconds
+
+    # Buffered reader's default line length cap is generous, but with base64
+    # payloads up to 5 MB our messages can hit ~7 MB. Bump rbufsize so
+    # rfile.readline() doesn't truncate.
+    rbufsize = 8 * 1024 * 1024  # 8 MB
+
+    def setup(self) -> None:
+        super().setup()
+        # Session state — see class docstring.
+        self._user: UserAcc | None = None
 
     def handle(self) -> None:
         peer = self.client_address
         logger.info("client connected: %s:%s", *peer)
         try:
-            for raw in self.rfile:
+            # readline() with a generous max so we can swallow a full 5 MB
+            # base64 payload (≈ 7 MB on the wire including JSON overhead).
+            max_line = 16 * 1024 * 1024  # 16 MB
+            while True:
+                raw = self.rfile.readline(max_line)
+                if not raw:
+                    break
                 line = raw.decode("utf-8", errors="replace").strip()
                 if not line:
                     continue
@@ -242,7 +382,11 @@ class _DummyAIHandler(socketserver.StreamRequestHandler):
         except socket.timeout:
             logger.info("client %s:%s timed out", *peer)
         finally:
-            logger.info("client closed: %s:%s", *peer)
+            logger.info(
+                "client closed: %s:%s (session=%s)",
+                *peer,
+                self._user.username if self._user else "<none>",
+            )
 
     # -- helpers -------------------------------------------------------------
     def _handle_line(self, line: str) -> dict[str, Any]:
@@ -257,39 +401,148 @@ class _DummyAIHandler(socketserver.StreamRequestHandler):
         kind = msg.get("type")
         if kind == "ping":
             return {"type": "pong"}
-        if kind == "auth":
-            username = str(msg.get("username", "")).strip()
-            password = str(msg.get("password", ""))
-            return self._auth(username, password)
+        if kind == "login":
+            return self._auth("login", msg)
+        if kind == "signup":
+            return self._auth("signup", msg)
+        if kind == "logout":
+            return self._logout()
         if kind == "query":
+            user = self._require_session()
+            if user is None:
+                return {"type": "error", "message": "not authenticated"}
             text = str(msg.get("text", "")).strip()
-            username = str(msg.get("username", "anonymous"))
             if not text:
                 return {"type": "error", "message": "empty 'text' field"}
-            return self._answer(username, text)
+            return self._answer(user, text)
+        if kind == "upload":
+            user = self._require_session()
+            if user is None:
+                return {"type": "error", "message": "not authenticated"}
+            return self._handle_upload(user, msg)
         return {"type": "error", "message": f"unknown type: {kind!r}"}
 
-    def _auth(self, username: str, password: str) -> dict[str, Any]:
+    def _require_session(self) -> UserAcc | None:
+        """Return the bound user, or None if the connection hasn't authenticated."""
+        return self._user
+
+    def _auth(self, mode: str, msg: dict[str, Any]) -> dict[str, Any]:
+        """
+        Dispatch a login or signup request and bind the result to the
+        connection on success.
+        """
+        username = str(msg.get("username", "")).strip()
+        password = str(msg.get("password", ""))
         try:
-            user, created = _authenticate(username, password)
+            if mode == "signup":
+                user = _signup(username, password)
+            else:
+                user = _login(username, password)
         except AuthError as exc:
-            logger.info("auth denied for %r: %s", username, exc)
+            # Log the real reason locally for ops, but only surface the
+            # safe message to the wire. Note we log the *requested*
+            # username, which on login may be an attacker probe — that's
+            # fine, the log is internal.
+            logger.info("%s denied for %r: %s", mode, username, exc)
             return {"type": "error", "message": str(exc)}
         except StorageError as exc:
-            logger.warning("auth storage error for %r: %s", username, exc)
+            logger.warning("%s storage error for %r: %s", mode, username, exc)
             return {"type": "error", "message": "internal storage error"}
-        logger.info("auth ok for %r (created=%s)", user.username, created)
-        return {"type": "auth_ok", "username": user.username, "created": created}
 
-    def _answer(self, username: str, text: str) -> dict[str, Any]:
+        # Bind the session to the connection.
+        self._user = user
+        logger.info("%s ok for %r (session bound)", mode, user.username)
+        return {"type": "auth_ok", "username": user.username}
+
+    def _logout(self) -> dict[str, Any]:
+        if self._user is not None:
+            logger.info("logout for %r", self._user.username)
+            self._user = None
+        return {"type": "logout_ok"}
+
+    def _answer(self, user: UserAcc, text: str) -> dict[str, Any]:
         # Pretend to think.
         time.sleep(random.uniform(MIN_THINK_SECONDS, MAX_THINK_SECONDS))
         body = random.choice(DUMMY_RESPONSES)
         # Echo a hint of the question so it feels less robotic.
         preview = text if len(text) <= 60 else text[:57] + "..."
-        answer = f"[dummy] {body}  (re: \"{preview}\")"
-        logger.info("query from %s: %r -> reply len=%d", username, preview, len(answer))
+        answer = f'[dummy] {body}  (re: "{preview}")'
+        logger.info(
+            "query from %s: %r -> reply len=%d",
+            user.username,
+            preview,
+            len(answer),
+        )
         return {"type": "answer", "text": answer}
+
+    def _handle_upload(self, user: UserAcc, msg: dict[str, Any]) -> dict[str, Any]:
+        """
+        Validate an upload message and return an ack.
+
+        Steps:
+          1. Shape validation (required string fields present, non-empty).
+          2. Extension allow-list check against SUPPORTED_EXTENSIONS.
+          3. Base64 decode (rejects malformed payload).
+          4. Size cap check against MAX_UPLOAD_BYTES.
+
+        This is a stub — once IngestionService is wired in, the decoded
+        bytes will be passed to it for the parse → chunk → embed → store
+        pipeline. The authenticated user.id will be stamped onto the
+        resulting Document at that point — see the TODO below.
+        """
+        filename = msg.get("filename")
+        if not isinstance(filename, str) or not filename.strip():
+            return {"type": "error", "message": "missing or empty 'filename'"}
+
+        bytes_b64 = msg.get("bytes_b64")
+        if not isinstance(bytes_b64, str):
+            return {"type": "error", "message": "missing 'bytes_b64' field"}
+
+        # Strip any directory component the client may have included.
+        filename = os.path.basename(filename)
+
+        # Extension allow-list. Catching unknown extensions here saves the
+        # base64 decode for files we'd reject anyway.
+        ext = os.path.splitext(filename)[1].lstrip(".").lower()
+        if ext not in SUPPORTED_EXTENSIONS:
+            return {
+                "type": "error",
+                "message": (
+                    f"unsupported extension '.{ext}' for '{filename}' "
+                    f"(supported: {sorted(SUPPORTED_EXTENSIONS)})"
+                ),
+            }
+
+        # Base64 decode. Use validate=True to catch malformed input fast.
+        try:
+            raw = base64.b64decode(bytes_b64, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            return {"type": "error", "message": f"invalid base64 payload: {exc}"}
+
+        if len(raw) > MAX_UPLOAD_BYTES:
+            return {
+                "type": "error",
+                "message": (
+                    f"upload '{filename}' is {len(raw)} bytes — "
+                    f"exceeds the {MAX_UPLOAD_BYTES}-byte cap"
+                ),
+            }
+
+        # TODO: hand `raw`, `filename`, and `user.id` to
+        # IngestionService.ingest(...) here.
+        logger.info(
+            "upload from %s: '%s' accepted (%d bytes, ext=.%s) [stub: not ingested]",
+            user.username,
+            filename,
+            len(raw),
+            ext,
+        )
+
+        return {
+            "type": "upload_ack",
+            "filename": filename,
+            "size": len(raw),
+        }
 
     def _send(self, obj: dict[str, Any]) -> None:
         data = (json.dumps(obj) + "\n").encode("utf-8")
@@ -304,7 +557,7 @@ class _ThreadedServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     daemon_threads = True
 
 
-# ── Public entry points ──────────────────────────────────────────────────────
+# Public entry points
 def serve_forever(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> None:
     """Run the server in the current thread until Ctrl+C."""
     with _ThreadedServer((host, port), _DummyAIHandler) as server:
@@ -337,9 +590,12 @@ def start_in_background(
 
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="DocChat dummy AI server")
-    p.add_argument("--host", default=DEFAULT_HOST, help="bind host (default %(default)s)")
-    p.add_argument("--port", type=int, default=DEFAULT_PORT,
-                   help="bind port (default %(default)s)")
+    p.add_argument(
+        "--host", default=DEFAULT_HOST, help="bind host (default %(default)s)"
+    )
+    p.add_argument(
+        "--port", type=int, default=DEFAULT_PORT, help="bind port (default %(default)s)"
+    )
     p.add_argument("--verbose", "-v", action="store_true", help="debug logging")
     return p.parse_args()
 
@@ -357,12 +613,14 @@ def main() -> None:
     if mongo_uri:
         try:
             from services.db.mongo_user_store import MongoUserStore
+
             set_user_store(MongoUserStore.from_uri(mongo_uri))
             logger.info("user store: MongoUserStore (%s)", mongo_uri)
         except StorageError as exc:
             logger.warning(
                 "could not connect to %s — falling back to in-memory user store: %s",
-                mongo_uri, exc,
+                mongo_uri,
+                exc,
             )
     else:
         logger.info("user store: in-memory (set MONGODB_URI to use Mongo)")

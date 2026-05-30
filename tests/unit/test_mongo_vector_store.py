@@ -102,9 +102,7 @@ class TestStore:
         self, store: MongoVectorStore[Chunk], collection: MagicMock
     ) -> None:
         doc_id = uuid.uuid4()
-        chunks = [
-            _make_chunk(position=i, doc_id=doc_id) for i in range(3)
-        ]
+        chunks = [_make_chunk(position=i, doc_id=doc_id) for i in range(3)]
 
         store.store(chunks)
 
@@ -130,7 +128,10 @@ class TestStore:
         # pymongo.ReplaceOne exposes. We hit pymongo's real class here.
         for op, chunk in zip(operations, chunks):
             # ReplaceOne stores filter as ._filter in pymongo 4.x
-            assert op._filter == {"doc_id": str(chunk.doc_id), "position": chunk.position}
+            assert op._filter == {
+                "doc_id": str(chunk.doc_id),
+                "position": chunk.position,
+            }
 
     def test_upsert_payload_stringifies_uuids(
         self, store: MongoVectorStore[Chunk], collection: MagicMock
@@ -210,7 +211,9 @@ class TestSearch:
         vec = _make_vector()
         store.search(vec, k=7)
 
-        stage: dict[str, Any] = collection.aggregate.call_args.args[0][0]["$vectorSearch"]
+        stage: dict[str, Any] = collection.aggregate.call_args.args[0][0][
+            "$vectorSearch"
+        ]
         assert stage["index"] == "chunk_embedding_vector_index"
         assert stage["path"] == "embedding"
         assert stage["queryVector"] == vec

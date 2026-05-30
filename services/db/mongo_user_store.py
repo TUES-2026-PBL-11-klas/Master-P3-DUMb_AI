@@ -120,7 +120,9 @@ class MongoUserStore:
             ) from exc
 
         logger.info(
-            "MongoUserStore: connected to %s.%s", db_name, collection_name,
+            "MongoUserStore: connected to %s.%s",
+            db_name,
+            collection_name,
         )
         return cls(collection=collection, _client=client)
 
@@ -147,9 +149,7 @@ class MongoUserStore:
         try:
             doc = self._col.find_one({"username": username})
         except Exception as exc:
-            raise StorageError(
-                f"find_by_username({username!r}) failed: {exc}"
-            ) from exc
+            raise StorageError(f"find_by_username({username!r}) failed: {exc}") from exc
 
         if doc is None:
             return None
@@ -188,9 +188,7 @@ class MongoUserStore:
             # mock-friendly; check by class name instead so a bare
             # MagicMock-raised exception still surfaces as StorageError.
             if type(exc).__name__ == "DuplicateKeyError":
-                raise StorageError(
-                    f"username {username!r} is already taken"
-                ) from exc
+                raise StorageError(f"username {username!r} is already taken") from exc
             raise StorageError(
                 f"insert_one for user {username!r} failed: {exc}"
             ) from exc
