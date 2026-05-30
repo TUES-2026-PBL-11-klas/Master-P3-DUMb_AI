@@ -2,12 +2,15 @@
 """
 DocChat TUI - AI-powered document chat interface (stub/prototype)
 
-Login always succeeds. Uploads read the file from local disk into bytes
-and send them to the dummy server over the persistent newline-delimited
-JSON socket (server stub validates the upload and returns an ack — no
+Login and signup are real: credentials are sent to the dummy server over
+a newline-delimited JSON socket, where they are hashed and stored. The
+TUI falls back to local-only auth when running --offline so it stays
+demoable without a backend.
+
+Uploads read the chosen file from local disk into bytes and send them to
+the server (the server stub validates the upload and returns an ack — no
 real ingestion yet). AI replies use the same socket; if the server is
-unreachable the chat screen falls back to a local stub so the UI still
-works offline.
+unreachable the chat screen falls back to a local stub.
 
 Run the server in one terminal:
     python -m services.dummy_server
@@ -73,12 +76,46 @@ def fetch_ai_response(text: str) -> str:
         state["ai_status"] = "offline"
         return stub_ai_response()
     try:
-        answer = client.ask(text, username=state.get("username") or "anonymous")
+        answer = client.ask(text)
         state["ai_status"] = "online"
         return answer
     except AIClientError as exc:
         state["ai_status"] = f"error: {exc}"
         return f"[connection lost] {exc}  (falling back to offline stub)"
+
+
+def normalize_input_path(raw: str | None) -> str:
+    """
+    Clean up a path the way a user is likely to have typed or pasted it.
+
+    Handles the common Windows + cross-platform footguns:
+      - Surrounding double or single quotes (from File Explorer's
+        "Copy as path" or PowerShell tab completion).
+      - Leading / trailing whitespace.
+      - A ``~`` for the home directory.
+      - Mixed slashes (normpath collapses them).
+
+    Returns the cleaned path. Does NOT check existence — that's
+    upload_file_to_server's job.
+    """
+    if raw is None:
+        return ""
+
+    path = raw.strip()
+
+    # Strip a single matching pair of surrounding quotes (single or double).
+    if len(path) >= 2 and path[0] == path[-1] and path[0] in ('"', "'"):
+        path = path[1:-1].strip()
+
+    # ~/notes.txt -> $HOME/notes.txt (or %USERPROFILE% on Windows).
+    if path.startswith("~"):
+        path = os.path.expanduser(path)
+
+    # Collapse "//" and ".." segments, normalise slash direction.
+    if path:
+        path = os.path.normpath(path)
+
+    return path
 
 
 def upload_file_to_server(path: str) -> tuple[bool, str]:
@@ -126,7 +163,7 @@ def upload_file_to_server(path: str) -> tuple[bool, str]:
         return True, f"'{name}' added locally (offline -- not sent to server)"
 
     try:
-        ack = client.upload(name, raw, username=state.get("username") or "anonymous")
+        ack = client.upload(name, raw)
     except AIClientError as exc:
         state["ai_status"] = f"error: {exc}"
         return False, f"Upload failed: {exc}"
@@ -142,7 +179,7 @@ def upload_file_to_server(path: str) -> tuple[bool, str]:
     return True, f"'{name}' uploaded ({size} bytes)"
 
 
-# Color pair IDs
+# ── Color pair IDs ───────────────────────────────────────────────────────────
 C_NORMAL = 1
 C_HEADER = 2
 C_ACCENT = 3
@@ -269,54 +306,288 @@ def read_line(
     return "".join(buf)
 
 
-# Screens
+# ── Screens ──────────────────────────────────────────────────────────────────
+
+
+def screen_auth_choice(stdscr: curses.window) -> str:
+    """
+    Entry screen: ask the user whether they want to log in or sign up.
+
+    Returns "login" or "signup".
+    """
+    selected = 0
+    options = ["Login", "Sign Up"]
+
+    while True:
+        stdscr.clear()
+        h, w = stdscr.getmaxyx()
+        draw_header(stdscr, "Welcome")
+        draw_footer(
+            stdscr, ["Up/Down to navigate", "Enter to select", "Ctrl+C to quit"]
+        )
+
+        center_text(
+            stdscr, 2, "Welcome to DocChat", curses.color_pair(C_ACCENT) | curses.A_BOLD
+        )
+        center_text(
+            stdscr,
+            3,
+            "AI-powered document Q&A",
+            curses.color_pair(C_DIM) | curses.A_DIM,
+        )
+
+        bw, bh = 40, 10
+        bx = max(0, (w - bw) // 2)
+        by = max(1, (h - bh) // 2)
+        draw_box(stdscr, by, bx, bh, bw, "Get Started")
+
+        for i, label in enumerate(options):
+            row = by + 2 + i * 3
+            is_sel = i == selected
+            arrow = ">>  " if is_sel else "    "
+            attr = (
+                (curses.color_pair(C_ACCENT) | curses.A_BOLD)
+                if is_sel
+                else curses.color_pair(C_NORMAL)
+            )
+            safe_addstr(stdscr, row, bx + 4, arrow + label, attr)
+
+        stdscr.refresh()
+
+        ch = stdscr.getch()
+        if ch == curses.KEY_UP:
+            selected = (selected - 1) % len(options)
+        elif ch == curses.KEY_DOWN:
+            selected = (selected + 1) % len(options)
+        elif ch in (10, 13):
+            return "login" if selected == 0 else "signup"
+        elif ch in (ord("1"),):
+            return "login"
+        elif ch in (ord("2"),):
+            return "signup"
 
 
 def screen_login(stdscr: curses.window) -> None:
-    stdscr.clear()
-    h, w = stdscr.getmaxyx()
-    draw_header(stdscr, "Login")
-    draw_footer(stdscr, ["Enter to confirm", "Ctrl+C to quit"])
+    """
+    Login screen — verifies credentials against the DB.
 
-    center_text(
-        stdscr, 2, "Welcome to DocChat", curses.color_pair(C_ACCENT) | curses.A_BOLD
-    )
-    center_text(
-        stdscr, 3, "AI-powered document Q&A", curses.color_pair(C_DIM) | curses.A_DIM
-    )
+    On wrong password the error is shown and the user is asked to try
+    again. If the server is unreachable, credentials are accepted locally
+    (offline stub) so the TUI is still demoable without the backend.
+    """
+    error_msg = ""
 
-    bw, bh = 42, 11
-    bx = max(0, (w - bw) // 2)
-    by = max(1, (h - bh) // 2)
-    draw_box(stdscr, by, bx, bh, bw, "Sign In")
+    while True:
+        stdscr.clear()
+        h, w = stdscr.getmaxyx()
+        draw_header(stdscr, "Login")
+        draw_footer(stdscr, ["Enter to confirm", "Ctrl+C to quit"])
 
-    safe_addstr(stdscr, by + 2, bx + 3, "Username:", curses.color_pair(C_ACCENT))
-    safe_addstr(stdscr, by + 5, bx + 3, "Password:", curses.color_pair(C_ACCENT))
-    safe_addstr(
-        stdscr,
-        by + 9,
-        bx + 3,
-        "(any credentials work -- stub mode)",
-        curses.color_pair(C_DIM) | curses.A_DIM,
-    )
-    stdscr.refresh()
+        center_text(
+            stdscr, 2, "Welcome back!", curses.color_pair(C_ACCENT) | curses.A_BOLD
+        )
+        center_text(
+            stdscr,
+            3,
+            "Sign in to your existing account",
+            curses.color_pair(C_DIM) | curses.A_DIM,
+        )
 
-    username = read_line(stdscr, by + 3, bx + 3, bw - 6)
-    read_line(stdscr, by + 6, bx + 3, bw - 6, mask=True)
+        bw, bh = 52, 12
+        bx = max(0, (w - bw) // 2)
+        by = max(1, (h - bh) // 2)
+        draw_box(stdscr, by, bx, bh, bw, "Login")
 
-    state["username"] = username or "guest"
-    state["logged_in"] = True
+        safe_addstr(stdscr, by + 2, bx + 3, "Username:", curses.color_pair(C_ACCENT))
+        safe_addstr(stdscr, by + 5, bx + 3, "Password:", curses.color_pair(C_ACCENT))
 
-    safe_addstr(
-        stdscr,
-        by + 7,
-        bx + 3,
-        "Logged in!",
-        curses.color_pair(C_SUCCESS) | curses.A_BOLD,
-    )
-    stdscr.refresh()
-    time.sleep(0.7)
-    state["current_screen"] = "main"
+        client = state.get("ai_client")
+        if client is None:
+            safe_addstr(
+                stdscr,
+                by + 9,
+                bx + 3,
+                "(offline -- credentials accepted locally)",
+                curses.color_pair(C_DIM) | curses.A_DIM,
+            )
+
+        if error_msg:
+            safe_addstr(
+                stdscr,
+                by + 10,
+                bx + 3,
+                error_msg[: bw - 6],
+                curses.color_pair(C_ERROR) | curses.A_BOLD,
+            )
+
+        stdscr.refresh()
+
+        username = read_line(stdscr, by + 3, bx + 3, bw - 6).strip()
+        password = read_line(stdscr, by + 6, bx + 3, bw - 6, mask=True)
+
+        if not username or not password:
+            error_msg = "Username and password are required."
+            continue
+
+        # Offline mode: accept locally so the TUI is demoable without a backend.
+        if client is None:
+            state["username"] = username
+            state["logged_in"] = True
+            safe_addstr(
+                stdscr,
+                by + 7,
+                bx + 3,
+                "Logged in (offline)!",
+                curses.color_pair(C_SUCCESS) | curses.A_BOLD,
+            )
+            stdscr.refresh()
+            time.sleep(0.7)
+            state["current_screen"] = "main"
+            return
+
+        # Online: send a login request. The server looks the username up,
+        # verifies the password hash, and returns auth_ok or an error.
+        try:
+            confirmed = client.login(username, password)
+        except AIClientError as exc:
+            msg = str(exc)
+            if "incorrect password" in msg:
+                error_msg = "Wrong password, try again."
+            elif "user not found" in msg:
+                error_msg = "Username not found. Did you mean to sign up?"
+            else:
+                error_msg = f"Server error: {msg}"
+            continue
+
+        state["username"] = confirmed
+        state["logged_in"] = True
+        safe_addstr(
+            stdscr,
+            by + 7,
+            bx + 3,
+            "Signed in!",
+            curses.color_pair(C_SUCCESS) | curses.A_BOLD,
+        )
+        stdscr.refresh()
+        time.sleep(0.7)
+        state["current_screen"] = "main"
+        return
+
+
+def screen_signup(stdscr: curses.window) -> None:
+    """
+    Sign-up screen — creates a new account in the DB.
+
+    If the username already exists the error is shown and the user is
+    asked to choose a different name. If the server is unreachable,
+    the account is accepted locally so the TUI remains demoable.
+    """
+    error_msg = ""
+
+    while True:
+        stdscr.clear()
+        h, w = stdscr.getmaxyx()
+        draw_header(stdscr, "Sign Up")
+        draw_footer(stdscr, ["Enter to confirm", "Ctrl+C to quit"])
+
+        center_text(
+            stdscr,
+            2,
+            "Create your account",
+            curses.color_pair(C_ACCENT) | curses.A_BOLD,
+        )
+        center_text(
+            stdscr,
+            3,
+            "Choose a username and password",
+            curses.color_pair(C_DIM) | curses.A_DIM,
+        )
+
+        bw, bh = 52, 14
+        bx = max(0, (w - bw) // 2)
+        by = max(1, (h - bh) // 2)
+        draw_box(stdscr, by, bx, bh, bw, "Sign Up")
+
+        safe_addstr(stdscr, by + 2, bx + 3, "Username:", curses.color_pair(C_ACCENT))
+        safe_addstr(stdscr, by + 5, bx + 3, "Password:", curses.color_pair(C_ACCENT))
+        safe_addstr(
+            stdscr, by + 8, bx + 3, "Confirm password:", curses.color_pair(C_ACCENT)
+        )
+
+        client = state.get("ai_client")
+        if client is None:
+            safe_addstr(
+                stdscr,
+                by + 11,
+                bx + 3,
+                "(offline -- account saved locally)",
+                curses.color_pair(C_DIM) | curses.A_DIM,
+            )
+
+        if error_msg:
+            safe_addstr(
+                stdscr,
+                by + 12,
+                bx + 3,
+                error_msg[: bw - 6],
+                curses.color_pair(C_ERROR) | curses.A_BOLD,
+            )
+
+        stdscr.refresh()
+
+        username = read_line(stdscr, by + 3, bx + 3, bw - 6).strip()
+        password = read_line(stdscr, by + 6, bx + 3, bw - 6, mask=True)
+        confirm = read_line(stdscr, by + 9, bx + 3, bw - 6, mask=True)
+
+        if not username or not password:
+            error_msg = "Username and password are required."
+            continue
+
+        if password != confirm:
+            error_msg = "Passwords do not match. Try again."
+            continue
+
+        # Offline mode: accept locally.
+        if client is None:
+            state["username"] = username
+            state["logged_in"] = True
+            safe_addstr(
+                stdscr,
+                by + 10,
+                bx + 3,
+                "Account created (offline)!",
+                curses.color_pair(C_SUCCESS) | curses.A_BOLD,
+            )
+            stdscr.refresh()
+            time.sleep(0.7)
+            state["current_screen"] = "main"
+            return
+
+        # Online: send a signup request. The server creates the account
+        # if the username is free, or returns an error if it's taken.
+        try:
+            confirmed = client.signup(username, password)
+        except AIClientError as exc:
+            msg = str(exc)
+            if "already taken" in msg or "already exists" in msg:
+                error_msg = "Username already taken. Choose another."
+            else:
+                error_msg = f"Server error: {msg}"
+            continue
+
+        state["username"] = confirmed
+        state["logged_in"] = True
+        safe_addstr(
+            stdscr,
+            by + 10,
+            bx + 3,
+            "Account created!",
+            curses.color_pair(C_SUCCESS) | curses.A_BOLD,
+        )
+        stdscr.refresh()
+        time.sleep(0.7)
+        state["current_screen"] = "main"
+        return
 
 
 def screen_main(stdscr: curses.window) -> None:
@@ -460,7 +731,8 @@ def screen_documents(stdscr: curses.window) -> None:
                 stdscr, h - 6, 2, "File path to upload:", curses.color_pair(C_ACCENT)
             )
             stdscr.refresh()
-            path = read_line(stdscr, h - 5, 2, w - 4).strip()
+            raw_input = read_line(stdscr, h - 5, 2, w - 4)
+            path = normalize_input_path(raw_input)
             if path and os.path.isfile(path):
                 # Show a transient status while we read + ship the bytes.
                 safe_addstr(stdscr, h - 4, 2, " " * (w - 4))
@@ -476,6 +748,8 @@ def screen_documents(stdscr: curses.window) -> None:
                 ok, msg = upload_file_to_server(path)
                 msg_attr = C_SUCCESS if ok else C_ERROR
             elif path:
+                # Show the cleaned-up path so the user can see why we
+                # disagree with them (e.g. quotes were stripped).
                 msg = f"File not found: {path}"
                 msg_attr = C_ERROR
             else:
@@ -604,6 +878,7 @@ def screen_chat(stdscr: curses.window) -> None:
 # Entry point
 
 
+
 def main(stdscr: curses.window) -> None:
     safe_curs_set(0)
     if hasattr(curses, "set_escdelay"):
@@ -612,7 +887,11 @@ def main(stdscr: curses.window) -> None:
     init_colors()
 
     try:
-        screen_login(stdscr)
+        choice = screen_auth_choice(stdscr)
+        if choice == "login":
+            screen_login(stdscr)
+        else:
+            screen_signup(stdscr)
         screen_main(stdscr)
     except KeyboardInterrupt:
         pass
