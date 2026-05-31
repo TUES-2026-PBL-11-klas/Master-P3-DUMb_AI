@@ -55,14 +55,15 @@ Indexes:
 
 ### `documents`
 
-Stores one uploaded/parsed document per record. The raw parsed text is stored in
-`content`, matching `Document.content` in `services/shared/domain.py`.
+Stores one uploaded/parsed document per record. The parsed document text is
+kept in backend memory as `Document.content` while the ingestion pipeline runs,
+but it is not persisted in MongoDB because the final searchable text is stored
+per chunk in `document_chunks.text`.
 
 Fields:
 
 - `_id`
 - `user_id`
-- `content`
 - `filename`
 - `uploaded_at`
 - `status`
