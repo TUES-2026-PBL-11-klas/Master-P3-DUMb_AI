@@ -1,0 +1,151 @@
+---
+- name: Configure MongoDB replica set hosts
+  hosts: mongo
+  become: true
+  gather_facts: true
+
+  pre_tasks:
+    - name: Validate inventory has an odd number of MongoDB nodes
+      ansible.builtin.assert:
+        that:
+          - groups["mongo"] | length >= 3
+          - (groups["mongo"] | length) % 2 == 1
+        fail_msg: "Use an odd number of MongoDB nodes, usually 3 for this project."
+
+    - name: Validate exactly one primary candidate is declared
+      ansible.builtin.assert:
+        that:
+          - groups["mongo_primary"] | length == 1
+        fail_msg: "inventory must contain exactly one host in [mongo_primary]."
+
+    - name: Select OS-specific MongoDB paths
+      ansible.builtin.set_fact:
+        mongo_config_path: >-
+          {{ mongo_linux_config_path if ansible_system != "Darwin"
+             else (mongo_macos_config_path_arm64 if ansible_architecture == "arm64"
+                   else mongo_macos_config_path_intel) }}
+        mongo_data_path: >-
+          {{ mongo_linux_data_path if ansible_system != "Darwin"
+             else mongo_macos_data_path }}
+        mongo_log_path: >-
+          {{ mongo_linux_log_path if ansible_system != "Darwin"
+             else mongo_macos_log_path }}
+        mongo_service_name: >-
+          {{ mongo_linux_service_name if ansible_system != "Darwin"
+             else mongo_macos_service_name }}
+
+  tasks:
+    - name: Explain package installation mode
+      ansible.builtin.debug:
+        msg: >-
+          mongo_install_packages={{ mongo_install_packages }}.
+          If false, mongod must already be installed on this host.
+
+    - name: Stop if package installation is requested on an unsupported OS
+      ansible.builtin.fail:
+        msg: "Package installation is currently documented but not automated for {{ ansible_system }}."
+      when:
+        - mongo_install_packages | bool
+        - ansible_system not in ["Linux", "Darwin"]
+
+    - name: Ensure MongoDB data directory exists
+      ansible.builtin.file:
+        path: "{{ mongo_data_path }}"
+        state: directory
+        mode: "0755"
+
+    - name: Ensure MongoDB log directory exists
+      ansible.builtin.file:
+        path: "{{ mongo_log_path | dirname }}"
+        state: directory
+        mode: "0755"
+
+    - name: Render mongod replica set configuration
+      ansible.builtin.template:
+        src: templates/mongod.conf.j2
+        dest: "{{ mongo_config_path }}"
+        mode: "0644"
+      notify: Restart MongoDB
+
+    - name: Flush handlers before checking MongoDB port
+      ansible.builtin.meta: flush_handlers
+
+    - name: Wait for MongoDB port
+      ansible.builtin.wait_for:
+        host: "{{ ansible_host | default(inventory_hostname) }}"
+        port: "{{ mongo_port }}"
+        timeout: 60
+
+  handlers:
+    - name: Restart MongoDB on Linux
+      ansible.builtin.service:
+        name: "{{ mongo_service_name }}"
+        state: restarted
+      when: ansible_system != "Darwin"
+      listen: Restart MongoDB
+
+    - name: Restart MongoDB on macOS
+      ansible.builtin.command:
+        cmd: "brew services restart {{ mongo_service_name }}"
+      changed_when: true
+      when: ansible_system == "Darwin"
+      listen: Restart MongoDB
+
+- name: Initiate MongoDB replica set
+  hosts: mongo_primary
+  become: false
+  gather_facts: false
+
+  tasks:
+    - name: Initiate or report existing replica set
+      ansible.builtin.shell: |
+        mongosh --quiet --host {{ ansible_host | default(inventory_hostname) }} --port {{ mongo_port }} --eval '
+        const config = {
+          _id: "{{ mongo_replica_set_name }}",
+          members: [
+        {% for host in groups["mongo"] %}
+            {
+              _id: {{ loop.index0 }},
+              host: "{{ hostvars[host].ansible_host | default(host) }}:{{ mongo_port }}",
+              priority: {{ hostvars[host].mongo_replica_priority | default(1) }}
+            }{{ "," if not loop.last else "" }}
+        {% endfor %}
+          ]
+        };
+        try {
+          const status = rs.status();
+          print("Replica set already initialized: " + status.set);
+        } catch (error) {
+          print("Initializing replica set {{ mongo_replica_set_name }}");
+          rs.initiate(config);
+        }
+        '
+      args:
+        executable: /bin/bash
+      register: replica_init
+      changed_when: "'Initializing replica set' in replica_init.stdout"
+
+    - name: Show replica set init result
+      ansible.builtin.debug:
+        var: replica_init.stdout_lines
+
+    - name: Wait until replica set elects a primary
+      ansible.builtin.shell: |
+        mongosh --quiet --host {{ ansible_host | default(inventory_hostname) }} --port {{ mongo_port }} --eval '
+        const status = rs.status();
+        print(status.members.map(m => m.name + ":" + m.stateStr).join("\n"));
+        if (!status.members.some(m => m.stateStr === "PRIMARY")) {
+          quit(1);
+        }
+        '
+      args:
+        executable: /bin/bash
+      register: replica_status
+      retries: 20
+      delay: 3
+      until: replica_status.rc == 0
+      changed_when: false
+
+    - name: Show replica set status summary
+      ansible.builtin.debug:
+        var: replica_status.stdout_lines

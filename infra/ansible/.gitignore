@@ -1,0 +1,3 @@
+# Real inventories contain private IPs/usernames and should stay local.
+inventory.ini
+

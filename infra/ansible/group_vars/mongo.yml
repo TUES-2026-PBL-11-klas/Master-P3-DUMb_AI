@@ -1,0 +1,32 @@
+---
+# MongoDB replica set defaults for the DUMb_AI deployment.
+
+mongo_replica_set_name: rs0
+mongo_port: 27017
+mongo_bind_ip: "0.0.0.0"
+
+# Keep this false until the exact OS/package setup is confirmed on the real
+# Linux server, Raspberry Pi, and MacBooks. With false, the playbook configures
+# an already-installed mongod service.
+mongo_install_packages: false
+
+# Database initialized by infra/mongo/init_db.js after the cluster is reachable.
+mongo_database_name: dumb_ai
+
+# Paths are selected automatically per OS unless overridden per host.
+mongo_linux_config_path: /etc/mongod.conf
+mongo_linux_data_path: /var/lib/mongodb
+mongo_linux_log_path: /var/log/mongodb/mongod.log
+mongo_linux_service_name: mongod
+
+mongo_macos_config_path_arm64: /opt/homebrew/etc/mongod.conf
+mongo_macos_config_path_intel: /usr/local/etc/mongod.conf
+mongo_macos_data_path: /opt/homebrew/var/mongodb
+mongo_macos_log_path: /opt/homebrew/var/log/mongodb/mongo.log
+mongo_macos_service_name: mongodb-community
+
+# For a first MVP inside a trusted private network, auth can stay disabled.
+# If these machines are exposed outside the team network, enable auth/keyFile
+# before using real data.
+mongo_enable_auth: false
+

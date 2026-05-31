@@ -1,0 +1,22 @@
+# Managed by Ansible for DUMb_AI.
+
+storage:
+  dbPath: {{ mongo_data_path }}
+
+systemLog:
+  destination: file
+  logAppend: true
+  path: {{ mongo_log_path }}
+
+net:
+  port: {{ mongo_port }}
+  bindIp: {{ mongo_bind_ip }}
+
+replication:
+  replSetName: {{ mongo_replica_set_name }}
+
+{% if mongo_enable_auth %}
+security:
+  authorization: enabled
+{% endif %}
+
