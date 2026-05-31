@@ -8,7 +8,6 @@ Run with:
 from __future__ import annotations
 
 import uuid
-from pathlib import Path
 
 import pytest
 
@@ -27,8 +26,8 @@ def parser() -> MarkdownParser:
 
 
 @pytest.fixture
-def md_file(tmp_path: Path) -> Path:
-    """Create a sample .md file with various Markdown elements."""
+def md_bytes() -> bytes:
+    """A sample .md payload with various Markdown elements."""
     content = """\
 # Main Title
 
@@ -61,25 +60,21 @@ def hello():
 
 Final paragraph with `inline code` and ~~strikethrough~~.
 """
-    p = tmp_path / "notes.md"
-    p.write_text(content, encoding="utf-8")
-    return p
+    return content.encode("utf-8")
 
 
 @pytest.fixture
-def plain_md(tmp_path: Path) -> Path:
-    """Minimal .md file with just plain text."""
-    p = tmp_path / "plain.md"
-    p.write_text("Hello world.\n", encoding="utf-8")
-    return p
+def plain_md_bytes() -> bytes:
+    """Minimal .md payload with just plain text."""
+    return "Hello world.\n".encode("utf-8")
 
 
 # Basic parsing
 
 
 class TestMarkdownParserBasic:
-    def test_returns_document(self, parser: MarkdownParser, md_file: Path) -> None:
-        result = parser.parse(md_file)
+    def test_returns_document(self, parser: MarkdownParser, md_bytes: bytes) -> None:
+        result = parser.parse(md_bytes, "notes.md")
 
         assert isinstance(result, Document)
         assert isinstance(result.id, uuid.UUID)
@@ -88,31 +83,40 @@ class TestMarkdownParserBasic:
         assert len(result.content) > 0
 
     def test_content_ends_with_newline(
-        self, parser: MarkdownParser, md_file: Path
+        self, parser: MarkdownParser, md_bytes: bytes
     ) -> None:
-        doc = parser.parse(md_file)
+        doc = parser.parse(md_bytes, "notes.md")
         assert doc.content.endswith("\n")
 
-    def test_plain_md_round_trip(self, parser: MarkdownParser, plain_md: Path) -> None:
-        doc = parser.parse(plain_md)
+    def test_plain_md_round_trip(
+        self, parser: MarkdownParser, plain_md_bytes: bytes
+    ) -> None:
+        doc = parser.parse(plain_md_bytes, "plain.md")
         assert "Hello world." in doc.content
 
-    def test_content_matches_file(self, parser: MarkdownParser, md_file: Path) -> None:
-        doc = parser.parse(md_file)
+    def test_content_matches_payload(
+        self, parser: MarkdownParser, md_bytes: bytes
+    ) -> None:
+        doc = parser.parse(md_bytes, "notes.md")
         assert "Main Title" in doc.content
         assert "Section Two" in doc.content
         assert "Final paragraph" in doc.content
 
-    def test_id_is_uuid(self, parser: MarkdownParser, md_file: Path) -> None:
-        doc = parser.parse(md_file)
+    def test_id_is_uuid(self, parser: MarkdownParser, md_bytes: bytes) -> None:
+        doc = parser.parse(md_bytes, "notes.md")
         assert isinstance(doc.id, uuid.UUID)
 
     def test_user_id_is_nil_sentinel(
-        self, parser: MarkdownParser, md_file: Path
+        self, parser: MarkdownParser, md_bytes: bytes
     ) -> None:
         # MarkdownParser sets a nil UUID; IngestionService replaces it later.
-        doc = parser.parse(md_file)
+        doc = parser.parse(md_bytes, "notes.md")
         assert doc.user_id == uuid.UUID(int=0)
+
+    def test_bytearray_accepted(self, parser: MarkdownParser) -> None:
+        """parse() accepts both bytes and bytearray for caller flexibility."""
+        doc = parser.parse(bytearray(b"# hi\n"), "hi.md")
+        assert "hi" in doc.content
 
 
 # Extension declaration
@@ -132,12 +136,8 @@ class TestMarkdownParserExtensions:
     def test_extensions_is_tuple(self, parser: MarkdownParser) -> None:
         assert isinstance(parser.extensions, tuple)
 
-    def test_markdown_extension_accepted(
-        self, parser: MarkdownParser, tmp_path: Path
-    ) -> None:
-        p = tmp_path / "notes.markdown"
-        p.write_text("Test content.\n", encoding="utf-8")
-        doc = parser.parse(p)
+    def test_markdown_extension_accepted(self, parser: MarkdownParser) -> None:
+        doc = parser.parse(b"Test content.\n", "notes.markdown")
         assert doc.filename == "notes.markdown"
 
 
@@ -147,92 +147,92 @@ class TestMarkdownParserExtensions:
 class TestMarkdownStripping:
     """Verify that Markdown syntax is removed and prose content preserved."""
 
-    def test_headings_stripped(self, parser: MarkdownParser, md_file: Path) -> None:
-        doc = parser.parse(md_file)
+    def test_headings_stripped(self, parser: MarkdownParser, md_bytes: bytes) -> None:
+        doc = parser.parse(md_bytes, "notes.md")
         assert "Main Title" in doc.content
         assert "Section Two" in doc.content
         assert "# " not in doc.content
         assert "## " not in doc.content
 
-    def test_bold_unwrapped(self, parser: MarkdownParser, md_file: Path) -> None:
-        doc = parser.parse(md_file)
+    def test_bold_unwrapped(self, parser: MarkdownParser, md_bytes: bytes) -> None:
+        doc = parser.parse(md_bytes, "notes.md")
         assert "bold text" in doc.content
         assert "**" not in doc.content
 
-    def test_italic_unwrapped(self, parser: MarkdownParser, md_file: Path) -> None:
-        doc = parser.parse(md_file)
+    def test_italic_unwrapped(self, parser: MarkdownParser, md_bytes: bytes) -> None:
+        doc = parser.parse(md_bytes, "notes.md")
         assert "italic text" in doc.content
         assert "*italic text*" not in doc.content
 
     def test_link_replaced_with_text(
-        self, parser: MarkdownParser, md_file: Path
+        self, parser: MarkdownParser, md_bytes: bytes
     ) -> None:
-        doc = parser.parse(md_file)
+        doc = parser.parse(md_bytes, "notes.md")
         assert "link to docs" in doc.content
         assert "https://example.com)" not in doc.content
         assert "](http" not in doc.content
 
     def test_image_replaced_with_alt(
-        self, parser: MarkdownParser, md_file: Path
+        self, parser: MarkdownParser, md_bytes: bytes
     ) -> None:
-        doc = parser.parse(md_file)
+        doc = parser.parse(md_bytes, "notes.md")
         assert "alt text" in doc.content
         assert "![" not in doc.content
         assert "img.png" not in doc.content
 
     def test_fenced_code_content_preserved(
-        self, parser: MarkdownParser, md_file: Path
+        self, parser: MarkdownParser, md_bytes: bytes
     ) -> None:
-        doc = parser.parse(md_file)
+        doc = parser.parse(md_bytes, "notes.md")
         assert "def hello():" in doc.content
         assert '    print("world")' in doc.content
         assert "```" not in doc.content
 
     def test_blockquote_markers_stripped(
-        self, parser: MarkdownParser, md_file: Path
+        self, parser: MarkdownParser, md_bytes: bytes
     ) -> None:
-        doc = parser.parse(md_file)
+        doc = parser.parse(md_bytes, "notes.md")
         assert "This is a blockquote." in doc.content
         for line in doc.content.splitlines():
             assert not line.startswith("> ")
 
     def test_unordered_list_bullets_stripped(
-        self, parser: MarkdownParser, md_file: Path
+        self, parser: MarkdownParser, md_bytes: bytes
     ) -> None:
-        doc = parser.parse(md_file)
+        doc = parser.parse(md_bytes, "notes.md")
         assert "Item one" in doc.content
         assert "Item two" in doc.content
         assert "- Item one" not in doc.content
 
     def test_ordered_list_numbers_stripped(
-        self, parser: MarkdownParser, md_file: Path
+        self, parser: MarkdownParser, md_bytes: bytes
     ) -> None:
-        doc = parser.parse(md_file)
+        doc = parser.parse(md_bytes, "notes.md")
         assert "First" in doc.content
         assert "1. First" not in doc.content
 
     def test_horizontal_rule_removed(
-        self, parser: MarkdownParser, md_file: Path
+        self, parser: MarkdownParser, md_bytes: bytes
     ) -> None:
-        doc = parser.parse(md_file)
+        doc = parser.parse(md_bytes, "notes.md")
         assert "---" not in doc.content
 
-    def test_inline_code_unwrapped(self, parser: MarkdownParser, md_file: Path) -> None:
-        doc = parser.parse(md_file)
+    def test_inline_code_unwrapped(
+        self, parser: MarkdownParser, md_bytes: bytes
+    ) -> None:
+        doc = parser.parse(md_bytes, "notes.md")
         assert "inline code" in doc.content
         assert "`inline code`" not in doc.content
 
     def test_strikethrough_unwrapped(
-        self, parser: MarkdownParser, md_file: Path
+        self, parser: MarkdownParser, md_bytes: bytes
     ) -> None:
-        doc = parser.parse(md_file)
+        doc = parser.parse(md_bytes, "notes.md")
         assert "strikethrough" in doc.content
         assert "~~" not in doc.content
 
-    def test_html_tags_removed(self, parser: MarkdownParser, tmp_path: Path) -> None:
-        p = tmp_path / "html.md"
-        p.write_text("Some <b>bold</b> and <em>italic</em> HTML.\n", encoding="utf-8")
-        doc = parser.parse(p)
+    def test_html_tags_removed(self, parser: MarkdownParser) -> None:
+        doc = parser.parse(b"Some <b>bold</b> and <em>italic</em> HTML.\n", "html.md")
         assert "bold" in doc.content
         assert "italic" in doc.content
         assert "<b>" not in doc.content
@@ -240,13 +240,9 @@ class TestMarkdownStripping:
         assert "<em>" not in doc.content
         assert "</em>" not in doc.content
 
-    def test_reference_link_stripped(
-        self, parser: MarkdownParser, tmp_path: Path
-    ) -> None:
-        content = "See [the docs][ref1] for details.\n\n[ref1]: https://example.com\n"
-        p = tmp_path / "ref.md"
-        p.write_text(content, encoding="utf-8")
-        doc = parser.parse(p)
+    def test_reference_link_stripped(self, parser: MarkdownParser) -> None:
+        payload = b"See [the docs][ref1] for details.\n\n[ref1]: https://example.com\n"
+        doc = parser.parse(payload, "ref.md")
         assert "the docs" in doc.content
         assert "[ref1]" not in doc.content
         assert "https://example.com" not in doc.content
@@ -256,29 +252,19 @@ class TestMarkdownStripping:
 
 
 class TestMarkdownParserNormalisation:
-    def test_trailing_spaces_stripped(
-        self, parser: MarkdownParser, tmp_path: Path
-    ) -> None:
-        p = tmp_path / "spaces.md"
-        p.write_text("line one   \nline two\t\t\n", encoding="utf-8")
-        doc = parser.parse(p)
+    def test_trailing_spaces_stripped(self, parser: MarkdownParser) -> None:
+        doc = parser.parse(b"line one   \nline two\t\t\n", "spaces.md")
         for line in doc.content.splitlines():
             assert line == line.rstrip()
 
-    def test_excessive_blank_lines_collapsed(
-        self, parser: MarkdownParser, tmp_path: Path
-    ) -> None:
-        p = tmp_path / "blanks.md"
-        p.write_text("para one\n\n\n\n\npara two\n", encoding="utf-8")
-        doc = parser.parse(p)
+    def test_excessive_blank_lines_collapsed(self, parser: MarkdownParser) -> None:
+        doc = parser.parse(b"para one\n\n\n\n\npara two\n", "blanks.md")
         assert "\n\n\n" not in doc.content
 
-    def test_empty_file_produces_single_newline(
-        self, parser: MarkdownParser, tmp_path: Path
+    def test_empty_payload_produces_single_newline(
+        self, parser: MarkdownParser
     ) -> None:
-        p = tmp_path / "empty.md"
-        p.write_text("", encoding="utf-8")
-        doc = parser.parse(p)
+        doc = parser.parse(b"", "empty.md")
         assert doc.content == "\n"
 
 
@@ -286,22 +272,16 @@ class TestMarkdownParserNormalisation:
 
 
 class TestMarkdownParserEncoding:
-    def test_latin1_file(self, parser: MarkdownParser, tmp_path: Path) -> None:
-        p = tmp_path / "latin.md"
-        p.write_bytes("Héllo café\n".encode("latin-1"))
-        doc = parser.parse(p)
+    def test_latin1_payload(self, parser: MarkdownParser) -> None:
+        doc = parser.parse("Héllo café\n".encode("latin-1"), "latin.md")
         assert "caf" in doc.content  # at least the ASCII portion survives
 
-    def test_utf8_bom(self, parser: MarkdownParser, tmp_path: Path) -> None:
-        p = tmp_path / "bom.md"
-        p.write_bytes(b"\xef\xbb\xbf# Title\nContent.\n")
-        doc = parser.parse(p)
+    def test_utf8_bom(self, parser: MarkdownParser) -> None:
+        doc = parser.parse(b"\xef\xbb\xbf# Title\nContent.\n", "bom.md")
         assert "Title" in doc.content
 
-    def test_utf16(self, parser: MarkdownParser, tmp_path: Path) -> None:
-        p = tmp_path / "wide.md"
-        p.write_bytes("# Title\nhello world\n".encode("utf-16"))
-        doc = parser.parse(p)
+    def test_utf16(self, parser: MarkdownParser) -> None:
+        doc = parser.parse("# Title\nhello world\n".encode("utf-16"), "wide.md")
         assert "hello world" in doc.content
 
 
@@ -309,27 +289,17 @@ class TestMarkdownParserEncoding:
 
 
 class TestMarkdownParserErrors:
-    def test_missing_file_raises(self, parser: MarkdownParser, tmp_path: Path) -> None:
-        with pytest.raises(RAGException, match="does not exist"):
-            parser.parse(tmp_path / "nonexistent.md")
-
-    def test_directory_raises(self, parser: MarkdownParser, tmp_path: Path) -> None:
-        with pytest.raises(RAGException, match="not a regular file"):
-            parser.parse(tmp_path)
-
-    def test_wrong_extension_raises(
-        self, parser: MarkdownParser, tmp_path: Path
-    ) -> None:
-        p = tmp_path / "notes.txt"
-        p.write_text("hello\n", encoding="utf-8")
+    def test_wrong_extension_raises(self, parser: MarkdownParser) -> None:
         with pytest.raises(UnsupportedFormatError, match="does not handle"):
-            parser.parse(p)
+            parser.parse(b"hello\n", "notes.txt")
 
-    def test_wrong_extension_pdf(self, parser: MarkdownParser, tmp_path: Path) -> None:
-        p = tmp_path / "notes.pdf"
-        p.write_text("fake pdf\n", encoding="utf-8")
+    def test_wrong_extension_pdf(self, parser: MarkdownParser) -> None:
         with pytest.raises(UnsupportedFormatError):
-            parser.parse(p)
+            parser.parse(b"fake pdf\n", "notes.pdf")
+
+    def test_non_bytes_raises(self, parser: MarkdownParser) -> None:
+        with pytest.raises(RAGException, match="expected bytes"):
+            parser.parse("not bytes", "notes.md")  # type: ignore[arg-type]
 
 
 # ParserRegistry integration

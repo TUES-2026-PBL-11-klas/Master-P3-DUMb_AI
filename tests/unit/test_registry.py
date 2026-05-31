@@ -7,7 +7,6 @@ Run with:
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import ClassVar
 
 import pytest
@@ -25,8 +24,8 @@ class _StubParser:
 
     extensions: ClassVar[tuple[str, ...]] = ("xyz",)
 
-    def parse(self, path: Path) -> str:
-        return path.read_text()
+    def parse(self, raw: bytes | bytearray, filename: str) -> str:
+        return bytes(raw).decode("utf-8")
 
 
 class _AlsoTxt:
@@ -34,7 +33,7 @@ class _AlsoTxt:
 
     extensions: ClassVar[tuple[str, ...]] = ("txt",)
 
-    def parse(self, path: Path) -> str:
+    def parse(self, raw: bytes | bytearray, filename: str) -> str:
         return ""
 
 
@@ -73,27 +72,26 @@ class TestRegistryGet:
         assert isinstance(registry.get("txt"), TxtParser)
 
 
-# get_for_path() tests
+# get_for_filename() tests
 
 
-class TestRegistryGetForPath:
-    def test_get_for_path(self, registry: ParserRegistry, tmp_path: Path) -> None:
+class TestRegistryGetForFilename:
+    def test_get_for_filename(self, registry: ParserRegistry) -> None:
         registry.register(TxtParser())
-        f = tmp_path / "notes.txt"
-        f.write_text("hi", encoding="utf-8")
-        assert isinstance(registry.get_for_path(f), TxtParser)
+        assert isinstance(registry.get_for_filename("notes.txt"), TxtParser)
 
-    def test_no_extension_raises(
-        self, registry: ParserRegistry, tmp_path: Path
-    ) -> None:
-        with pytest.raises(UnsupportedFormatError):
-            registry.get_for_path(tmp_path / "README")
+    def test_filename_with_directory_prefix(self, registry: ParserRegistry) -> None:
+        """A client that includes a leading dir should still resolve correctly."""
+        registry.register(TxtParser())
+        assert isinstance(registry.get_for_filename("subdir/notes.txt"), TxtParser)
 
-    def test_unregistered_extension_raises(
-        self, registry: ParserRegistry, tmp_path: Path
-    ) -> None:
+    def test_no_extension_raises(self, registry: ParserRegistry) -> None:
         with pytest.raises(UnsupportedFormatError):
-            registry.get_for_path(tmp_path / "data.pdf")
+            registry.get_for_filename("README")
+
+    def test_unregistered_extension_raises(self, registry: ParserRegistry) -> None:
+        with pytest.raises(UnsupportedFormatError):
+            registry.get_for_filename("data.pdf")
 
 
 # Introspection

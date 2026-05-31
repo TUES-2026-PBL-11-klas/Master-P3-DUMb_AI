@@ -126,3 +126,13 @@ class QueryResult:
 
     def top_sources(self, n: int) -> list[Chunk]:
         return self.sources[:n]
+
+
+@dataclass
+class UserAcc:
+    """User account information."""
+
+    id: UUID
+    username: str
+    password_hash: str
+    created_at: datetime
