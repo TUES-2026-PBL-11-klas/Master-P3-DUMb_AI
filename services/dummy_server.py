@@ -24,7 +24,9 @@ Server -> Client:
     {"type": "auth_ok",    "username": "<str>"}     # reply to login / signup
     {"type": "logout_ok"}
     {"type": "answer",     "text": "<str>"}         # reply to query
-    {"type": "upload_ack", "filename": "<str>", "size": <int>}
+    {"type": "upload_ack", "filename": "<str>", "size": <int>,
+                           "chunks": <int>,         # optional — present only
+                           "doc_id": "<str>"}       # when a pipeline is wired
     {"type": "error",      "message": "<str>"}      # malformed request,
                                                     # auth failure, missing
                                                     # session, or upload
@@ -55,11 +57,14 @@ Auth design notes:
       message wording.
 
 Upload design note:
-    The upload handler is intentionally a *stub* — it validates the
-    message shape, base64-decodes the payload, checks the size cap and
-    the allow-list of extensions, and returns an ack. It does NOT yet
-    feed the bytes into IngestionService (parser → chunk → embed →
-    store). Wiring that up is the next step; the protocol is stable.
+    The upload handler validates the message shape, base64-decodes the
+    payload, checks the size cap and the allow-list of extensions, then —
+    if an IngestionService has been wired via set_ingestion_service() —
+    feeds the bytes into it for the parse → chunk → embed → store pipeline
+    and returns an ack carrying the chunk count and document id. When no
+    pipeline is wired (offline demos, unit tests), it falls back to a
+    validate-only stub that returns a plain ack. The protocol is stable
+    across both modes — the extra ack fields are optional.
 
 Run it
 ------
@@ -84,10 +89,13 @@ import socket
 import socketserver
 import threading
 import time
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
-from services.shared.domain import UserAcc
-from services.shared.exceptions import AuthError, StorageError
+from services.shared.domain import IngestionStatus, UserAcc
+from services.shared.exceptions import AuthError, RAGException, StorageError
+
+if TYPE_CHECKING:
+    from services.ingestion.service import IngestionService
 
 # Configuration
 DEFAULT_HOST = "127.0.0.1"
@@ -101,9 +109,11 @@ MAX_THINK_SECONDS = 0.8
 # ("Hard upload size cap (default: 5 MB per file)").
 MAX_UPLOAD_BYTES = 5 * 1024 * 1024  # 5 MB
 
-# Extensions the server will accept. In the wired-up server this comes from
-# ParserRegistry.supported_extensions; the stub hard-codes the same set so
-# the TUI gets the same early-rejection behaviour.
+# Extensions the server accepts when NO ingestion pipeline is wired (offline
+# demos / tests). When a pipeline is wired via set_ingestion_service(), the
+# allow-list is taken from the live ParserRegistry instead (see _handle_upload)
+# so it can never drift from what the parsers actually handle. This frozenset
+# is the stub fallback and mirrors the parsers' current extensions.
 SUPPORTED_EXTENSIONS: frozenset[str] = frozenset(
     {"txt", "md", "markdown", "mkd", "mkdn", "mdown"}
 )
@@ -113,16 +123,16 @@ SUPPORTED_EXTENSIONS: frozenset[str] = frozenset(
 _INVALID_CREDENTIALS = "invalid credentials"
 
 DUMMY_RESPONSES = [
-    "Based on the documents you uploaded, the short answer is: yes, but with caveats.",
-    "I scanned the relevant chunks and the most likely answer is somewhere on page 3.",
-    "Good question. The documents suggest three possible interpretations -- want me to enumerate them?",
-    "I couldn't find a definitive answer, but the closest match talks about exactly this topic.",
-    "According to your uploaded files, the relevant section explicitly addresses this.",
-    "That's outside what your documents cover. Try uploading more material on the topic.",
-    "The documents mention this in passing -- I'd recommend re-checking the source for nuance.",
-    "Yes. The evidence in your corpus points clearly in that direction.",
-    "No, your documents actually argue the opposite, citing a specific case study.",
-    "I'd summarize the answer in three bullet points if you'd like a quick overview.",
+    "Based on the documents you uploaded, the short answer is: yes, but with caveats. [dummy response from server]",
+    "I scanned the relevant chunks and the most likely answer is somewhere on page 3. [dummy response from server]",
+    "Good question. The documents suggest three possible interpretations -- want me to enumerate them? [dummy response from server]",
+    "I couldn't find a definitive answer, but the closest match talks about exactly this topic. [dummy response from server]",
+    "According to your uploaded files, the relevant section explicitly addresses this. [dummy response from server]",
+    "That's outside what your documents cover. Try uploading more material on the topic. [dummy response from server]",
+    "The documents mention this in passing -- I'd recommend re-checking the source for nuance. [dummy response from server]",
+    "Yes. The evidence in your corpus points clearly in that direction. [dummy response from server]",
+    "No, your documents actually argue the opposite, citing a specific case study. [dummy response from server]",
+    "I'd summarize the answer in three bullet points if you'd like a quick overview. [dummy response from server]",
 ]
 
 logger = logging.getLogger("dummy_server")
@@ -185,6 +195,17 @@ def set_user_store(store: _UserStore) -> None:
     """Swap the active user store (used by main() and by tests)."""
     global _user_store
     _user_store = store
+
+
+# None means "no pipeline wired" → _handle_upload falls back to the validate-only
+# stub (so offline demos and the socket integration tests still get an ack).
+_ingestion_service: "IngestionService | None" = None
+
+
+def set_ingestion_service(service: "IngestionService | None") -> None:
+    """Swap the active ingestion pipeline (used by main() and by tests)."""
+    global _ingestion_service
+    _ingestion_service = service
 
 
 # Password hashing
@@ -477,18 +498,20 @@ class _DummyAIHandler(socketserver.StreamRequestHandler):
 
     def _handle_upload(self, user: UserAcc, msg: dict[str, Any]) -> dict[str, Any]:
         """
-        Validate an upload message and return an ack.
+        Validate an upload message, run ingestion if wired, and return an ack.
 
         Steps:
           1. Shape validation (required string fields present, non-empty).
-          2. Extension allow-list check against SUPPORTED_EXTENSIONS.
+          2. Extension allow-list check (from the live ParserRegistry when a
+             pipeline is wired, else the SUPPORTED_EXTENSIONS stub set).
           3. Base64 decode (rejects malformed payload).
           4. Size cap check against MAX_UPLOAD_BYTES.
+          5. If an IngestionService is wired, hand (filename, raw, user.id) to
+             it for the parse → chunk → embed → store pipeline and return an
+             ack with the chunk count + doc id. Otherwise return a plain ack.
 
-        This is a stub — once IngestionService is wired in, the decoded
-        bytes will be passed to it for the parse → chunk → embed → store
-        pipeline. The authenticated user.id will be stamped onto the
-        resulting Document at that point — see the TODO below.
+        The authenticated user.id is stamped onto every resulting chunk inside
+        IngestionService — the wire never trusts a client-supplied user id.
         """
         filename = msg.get("filename")
         if not isinstance(filename, str) or not filename.strip():
@@ -501,15 +524,24 @@ class _DummyAIHandler(socketserver.StreamRequestHandler):
         # Strip any directory component the client may have included.
         filename = os.path.basename(filename)
 
+        # Source of truth for accepted extensions: the live registry when a
+        # pipeline is wired, else the hard-coded stub set. This keeps the
+        # early-rejection check from drifting away from what the parsers handle.
+        supported = (
+            frozenset(_ingestion_service.supported_extensions)
+            if _ingestion_service is not None
+            else SUPPORTED_EXTENSIONS
+        )
+
         # Extension allow-list. Catching unknown extensions here saves the
         # base64 decode for files we'd reject anyway.
         ext = os.path.splitext(filename)[1].lstrip(".").lower()
-        if ext not in SUPPORTED_EXTENSIONS:
+        if ext not in supported:
             return {
                 "type": "error",
                 "message": (
                     f"unsupported extension '.{ext}' for '{filename}' "
-                    f"(supported: {sorted(SUPPORTED_EXTENSIONS)})"
+                    f"(supported: {sorted(supported)})"
                 ),
             }
 
@@ -528,20 +560,53 @@ class _DummyAIHandler(socketserver.StreamRequestHandler):
                 ),
             }
 
-        # TODO: hand `raw`, `filename`, and `user.id` to
-        # IngestionService.ingest(...) here.
+        # No pipeline wired (offline demo / tests) → keep the validate-only stub.
+        if _ingestion_service is None:
+            logger.info(
+                "upload from %s: '%s' accepted (%d bytes, ext=.%s) "
+                "[stub: no ingestion service wired]",
+                user.username,
+                filename,
+                len(raw),
+                ext,
+            )
+            return {"type": "upload_ack", "filename": filename, "size": len(raw)}
+
+        # Real pipeline: parse → chunk → embed → store. The authenticated
+        # user.id is stamped onto every chunk inside IngestionService.
+        try:
+            event = _ingestion_service.ingest(filename, raw, user.id)
+        except RAGException as exc:
+            logger.warning(
+                "upload from %s: ingestion failed for '%s': %s",
+                user.username,
+                filename,
+                exc,
+            )
+            return {"type": "error", "message": f"ingestion failed: {exc}"}
+
+        if event.status is IngestionStatus.FAILED:
+            error_msg = event.error_message or "unknown ingestion error"
+            logger.warning(
+                "upload from %s: '%s' FAILED: %s", user.username, filename, error_msg
+            )
+            return {"type": "error", "message": f"ingestion failed: {error_msg}"}
+
         logger.info(
-            "upload from %s: '%s' accepted (%d bytes, ext=.%s) [stub: not ingested]",
+            "upload from %s: '%s' ingested (%d bytes -> %d chunks, doc_id=%s)",
             user.username,
             filename,
             len(raw),
-            ext,
+            len(event.chunks),
+            event.document.id,
         )
 
         return {
             "type": "upload_ack",
             "filename": filename,
             "size": len(raw),
+            "chunks": len(event.chunks),
+            "doc_id": str(event.document.id),
         }
 
     def _send(self, obj: dict[str, Any]) -> None:
@@ -624,6 +689,27 @@ def main() -> None:
             )
     else:
         logger.info("user store: in-memory (set MONGODB_URI to use Mongo)")
+
+    # Wire the real ingestion pipeline when both backends are configured.
+    # Without them, uploads still validate and ack (stub) so demos work.
+    llama_url = os.environ.get("LLAMA_CPP_URL")
+    if mongo_uri and llama_url:
+        try:
+            from services.ingestion.composition import build_ingestion_service
+
+            set_ingestion_service(build_ingestion_service(mongo_uri, llama_url))
+            logger.info(
+                "ingestion pipeline: ON (mongo=%s, llama=%s)", mongo_uri, llama_url
+            )
+        except RAGException as exc:
+            logger.warning(
+                "could not build ingestion pipeline — uploads will validate-only: %s",
+                exc,
+            )
+    else:
+        logger.info(
+            "ingestion pipeline: OFF (set MONGODB_URI and LLAMA_CPP_URL to enable)"
+        )
 
     serve_forever(args.host, args.port)
 

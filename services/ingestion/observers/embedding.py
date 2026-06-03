@@ -26,9 +26,7 @@ from services.shared.domain import IngestionStatus, DocumentStatus
 from services.shared.exceptions import EmbeddingError
 
 if TYPE_CHECKING:
-    from services.shared.client import (
-        LlamaCppClient,
-    )  # if the name of the client class/dir changes, the import here needs to be updated
+    from services.shared.protocols import LlamaCppClient
     from services.shared.domain import IngestionEvent
 
 logger = logging.getLogger(__name__)

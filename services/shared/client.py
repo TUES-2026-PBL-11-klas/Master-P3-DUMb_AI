@@ -1,16 +1,15 @@
 from __future__ import annotations
 
-from typing import Protocol, runtime_checkable
 
+class PlatformEmbeddingClient:
+    """Stub — replace with the real llama.cpp HTTP client implementation."""
 
-@runtime_checkable
-class LlamaCppClient(Protocol):
-    """Structural interface for the llama.cpp HTTP embedding client."""
+    def __init__(self, base_url: str, *, model: str = "bge-m3") -> None:
+        self._base_url = base_url
+        self._model = model
 
     def embed(self, text: str) -> list[float]:
-        """Return a single embedding vector for *text*."""
-        ...
+        raise NotImplementedError
 
     def embed_batch(self, texts: list[str]) -> list[list[float]]:
-        """Return one embedding vector per entry in *texts*."""
-        ...
+        raise NotImplementedError

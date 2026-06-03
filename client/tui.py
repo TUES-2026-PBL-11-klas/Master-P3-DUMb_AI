@@ -169,14 +169,17 @@ def upload_file_to_server(path: str) -> tuple[bool, str]:
         return False, f"Upload failed: {exc}"
 
     state["ai_status"] = f"online ({client.host}:{client.port})"
+    chunks = ack.get("chunks")  # absent when the server runs the validate-only stub
     state["documents"].append(
         {
             "name": ack.get("filename", name),
             "size": ack.get("size", size),
+            "chunks": chunks,
             "uploaded_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
         }
     )
-    return True, f"'{name}' uploaded ({size} bytes)"
+    detail = f"{size} bytes" if chunks is None else f"{size} bytes, {chunks} chunks"
+    return True, f"'{name}' uploaded ({detail})"
 
 
 # ── Color pair IDs ───────────────────────────────────────────────────────────
@@ -696,7 +699,12 @@ def screen_documents(stdscr: curses.window) -> None:
             size_kb = doc["size"] / 1024
             is_sel = i == selected
             arrow = ">> " if is_sel else "   "
-            line = f"{doc['name']:<28}  {size_kb:>6.1f} KB   {doc['uploaded_at']}"
+            chunks = doc.get("chunks")
+            chunk_str = f"{chunks:>4} chunks" if chunks is not None else "  -- chunks"
+            line = (
+                f"{doc['name']:<28}  {size_kb:>6.1f} KB  {chunk_str}   "
+                f"{doc['uploaded_at']}"
+            )
             attr = (
                 (curses.color_pair(C_ACCENT) | curses.A_BOLD)
                 if is_sel
@@ -876,7 +884,6 @@ def screen_chat(stdscr: curses.window) -> None:
 
 
 # Entry point
-
 
 
 def main(stdscr: curses.window) -> None:
