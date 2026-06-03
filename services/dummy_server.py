@@ -85,7 +85,12 @@ import threading
 from typing import Any, Protocol
 
 from services.shared.domain import QueryResult, UserAcc
-from services.shared.exceptions import AuthError, QueryError, StorageError
+from services.shared.exceptions import (
+    AuthError,
+    QueryError,
+    RAGException,
+    StorageError,
+)
 
 # Configuration
 DEFAULT_HOST = "127.0.0.1"
@@ -644,6 +649,25 @@ def main() -> None:
             )
     else:
         logger.info("user store: in-memory (set MONGODB_URI to use Mongo)")
+
+    try:
+        from services.query.wiring import build_query_service_from_env
+
+        query_service = build_query_service_from_env()
+        if query_service is None:
+            set_query_service(None)
+            logger.info(
+                "query service: disabled "
+                "(set RAG_MONGODB_URI or MONGODB_URI to enable)"
+            )
+        else:
+            set_query_service(query_service)
+            logger.info(
+                "query service: QueryService wired with MongoVectorStore + Ollama"
+            )
+    except RAGException as exc:
+        set_query_service(None)
+        logger.warning("query service disabled: %s", exc)
 
     serve_forever(args.host, args.port)
 
