@@ -21,14 +21,20 @@ Then launch the TUI in another:
     python -m client.tui --offline                       # force local stub
 """
 
+from __future__ import annotations
+
 import argparse
-import curses
 import os
 import sys
 import time
 import textwrap
 from datetime import datetime
 from typing import Any
+
+try:
+    import curses
+except ModuleNotFoundError:
+    curses = None  # type: ignore[assignment]
 
 # Make ``python client/tui.py`` work as well as ``python -m client.tui``.
 if __package__ in (None, ""):
@@ -939,6 +945,12 @@ def _setup_ai_client(args: argparse.Namespace) -> None:
 
 
 if __name__ == "__main__":
+    if curses is None:
+        raise RuntimeError(
+            "The curses module is not available in this Python environment. "
+            "Run the TUI from WSL/Linux/macOS, or install a curses-compatible "
+            "Windows environment."
+        )
     cli_args = _parse_cli()
     _setup_ai_client(cli_args)
     try:

@@ -14,3 +14,12 @@ class LlamaCppClient(Protocol):
     def embed_batch(self, texts: list[str]) -> list[list[float]]:
         """Return one embedding vector per entry in *texts*."""
         ...
+
+
+@runtime_checkable
+class GenerationClient(Protocol):
+    """Structural interface for a text generation model client."""
+
+    def generate(self, prompt: str) -> str:
+        """Return a generated answer for *prompt*."""
+        ...

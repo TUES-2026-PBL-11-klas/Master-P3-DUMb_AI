@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-DocChat dummy AI server.
+DocChat socket AI server.
 
-A tiny TCP socket server that pretends to be the AI backend. It speaks a
-newline-delimited JSON protocol so the TUI (or any other client) can be
-developed and demoed before the real RAG pipeline is wired up.
+A tiny TCP socket server that exposes the backend protocol used by the TUI.
+It speaks newline-delimited JSON and delegates real queries to an injected
+QueryService.
 
 Protocol
 --------
@@ -78,24 +78,18 @@ import hmac
 import json
 import logging
 import os
-import random
 import secrets
 import socket
 import socketserver
 import threading
-import time
 from typing import Any, Protocol
 
-from services.shared.domain import UserAcc
-from services.shared.exceptions import AuthError, StorageError
+from services.shared.domain import QueryResult, UserAcc
+from services.shared.exceptions import AuthError, QueryError, StorageError
 
 # Configuration
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 5555
-
-# Simulated "thinking" delay so the UI feels like it's talking to a real model.
-MIN_THINK_SECONDS = 0.2
-MAX_THINK_SECONDS = 0.8
 
 # Hard upload size cap
 # ("Hard upload size cap (default: 5 MB per file)").
@@ -111,19 +105,6 @@ SUPPORTED_EXTENSIONS: frozenset[str] = frozenset(
 # Single message the wire returns for any login failure. Never include the
 # specific reason here — see the auth design note in the module docstring.
 _INVALID_CREDENTIALS = "invalid credentials"
-
-DUMMY_RESPONSES = [
-    "Based on the documents you uploaded, the short answer is: yes, but with caveats.",
-    "I scanned the relevant chunks and the most likely answer is somewhere on page 3.",
-    "Good question. The documents suggest three possible interpretations -- want me to enumerate them?",
-    "I couldn't find a definitive answer, but the closest match talks about exactly this topic.",
-    "According to your uploaded files, the relevant section explicitly addresses this.",
-    "That's outside what your documents cover. Try uploading more material on the topic.",
-    "The documents mention this in passing -- I'd recommend re-checking the source for nuance.",
-    "Yes. The evidence in your corpus points clearly in that direction.",
-    "No, your documents actually argue the opposite, citing a specific case study.",
-    "I'd summarize the answer in three bullet points if you'd like a quick overview.",
-]
 
 logger = logging.getLogger("dummy_server")
 
@@ -143,6 +124,12 @@ class _UserStore(Protocol):
     def find_by_username(self, username: str) -> UserAcc | None: ...
 
     def create(self, username: str, password_hash: str) -> UserAcc: ...
+
+
+class _QueryService(Protocol):
+    """Minimal query service surface the socket handler needs."""
+
+    def ask(self, user_id: object, question: str) -> QueryResult: ...
 
 
 class _MemoryUserStore:
@@ -179,12 +166,19 @@ class _MemoryUserStore:
 
 # Module-level hook — replace from main() / tests via set_user_store().
 _user_store: _UserStore = _MemoryUserStore()
+_query_service: _QueryService | None = None
 
 
 def set_user_store(store: _UserStore) -> None:
     """Swap the active user store (used by main() and by tests)."""
     global _user_store
     _user_store = store
+
+
+def set_query_service(service: _QueryService | None) -> None:
+    """Swap the active query service, or disable query handling with None."""
+    global _query_service
+    _query_service = service
 
 
 # Password hashing
@@ -461,19 +455,45 @@ class _DummyAIHandler(socketserver.StreamRequestHandler):
         return {"type": "logout_ok"}
 
     def _answer(self, user: UserAcc, text: str) -> dict[str, Any]:
-        # Pretend to think.
-        time.sleep(random.uniform(MIN_THINK_SECONDS, MAX_THINK_SECONDS))
-        body = random.choice(DUMMY_RESPONSES)
-        # Echo a hint of the question so it feels less robotic.
-        preview = text if len(text) <= 60 else text[:57] + "..."
-        answer = f'[dummy] {body}  (re: "{preview}")'
+        if _query_service is None:
+            logger.warning(
+                "query from %s rejected: query service is not configured",
+                user.username,
+            )
+            return {"type": "error", "message": "query service is not configured"}
+
+        try:
+            result = _query_service.ask(user.id, text)
+        except QueryError as exc:
+            logger.warning("query from %s failed: %s", user.username, exc)
+            return {"type": "error", "message": str(exc)}
+        except Exception as exc:
+            logger.exception("query from %s failed unexpectedly", user.username)
+            return {"type": "error", "message": f"query failed: {exc}"}
+
         logger.info(
             "query from %s: %r -> reply len=%d",
             user.username,
-            preview,
-            len(answer),
+            text[:60],
+            len(result.answer),
         )
-        return {"type": "answer", "text": answer}
+        return {
+            "type": "answer",
+            "text": result.answer,
+            "sources": self._serialize_sources(result),
+        }
+
+    @staticmethod
+    def _serialize_sources(result: QueryResult) -> list[dict[str, Any]]:
+        return [
+            {
+                "doc_id": str(chunk.doc_id),
+                "position": chunk.position,
+                "similarity": chunk.similarity,
+                "metadata": chunk.metadata,
+            }
+            for chunk in result.sources
+        ]
 
     def _handle_upload(self, user: UserAcc, msg: dict[str, Any]) -> dict[str, Any]:
         """

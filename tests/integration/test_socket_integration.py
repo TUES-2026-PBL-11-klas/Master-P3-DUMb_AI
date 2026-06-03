@@ -33,9 +33,11 @@ from client.ai_client import AIClient, AIClientError, MAX_UPLOAD_BYTES
 from services.dummy_server import (
     SUPPORTED_EXTENSIONS,
     _MemoryUserStore,
+    set_query_service,
     set_user_store,
     start_in_background,
 )
+from services.shared.domain import QueryResult
 
 
 # Fixtures
@@ -47,10 +49,31 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
+class _FakeQueryService:
+    def ask(self, user_id: object, question: str) -> QueryResult:
+        return QueryResult(answer=f"[test-rag] {question}")
+
+
 @pytest.fixture
 def server() -> Generator[tuple[str, int], None, None]:
     # Fresh in-memory user store per test so tests don't see each other.
     set_user_store(_MemoryUserStore())
+    set_query_service(_FakeQueryService())
+
+    port = _free_port()
+    srv, _thread = start_in_background(host="127.0.0.1", port=port)
+    try:
+        yield "127.0.0.1", port
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        set_query_service(None)
+
+
+@pytest.fixture
+def server_without_query_service() -> Generator[tuple[str, int], None, None]:
+    set_user_store(_MemoryUserStore())
+    set_query_service(None)
 
     port = _free_port()
     srv, _thread = start_in_background(host="127.0.0.1", port=port)
@@ -310,6 +333,14 @@ class TestSessionEnforcement:
         reply = _raw_send(host, port, {"type": "query", "text": "hi"})
         assert reply["type"] == "error"
         assert "not authenticated" in str(reply["message"])
+
+    def test_query_without_query_service_returns_error(
+        self, server_without_query_service: tuple[str, int]
+    ) -> None:
+        host, port = server_without_query_service
+        with _authed_client(host, port, "alice") as c:
+            with pytest.raises(AIClientError, match="query service"):
+                c.ask("hi")
 
     def test_session_does_not_leak_across_connections(
         self, server: tuple[str, int]
