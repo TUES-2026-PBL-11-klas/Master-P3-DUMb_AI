@@ -40,14 +40,20 @@ except ModuleNotFoundError:
 if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from client.ai_client import AIClient, AIClientError, MAX_UPLOAD_BYTES
+from client.ai_client import (
+    AIClient,
+    AIClientError,
+    AnswerResponse,
+    AnswerSource,
+    MAX_UPLOAD_BYTES,
+)
 
 # In-memory state
 state: dict[str, Any] = {
     "logged_in": False,
     "username": "",
     "documents": [],  # {"name", "size", "uploaded_at"}
-    "messages": [],  # {"role": "user"|"ai", "text", "time"}
+    "messages": [],  # {"role": "user"|"ai", "text", "time", "sources"?}
     "current_screen": "login",
     "ai_client": None,  # AIClient or None when running --offline
     "ai_status": "offline",  # "online" | "offline" | "error: ..."
@@ -70,24 +76,47 @@ def stub_ai_response() -> str:
     return r
 
 
-def fetch_ai_response(text: str) -> str:
+def fetch_ai_response(text: str) -> AnswerResponse:
     """
     Ask the dummy server for a reply, with graceful fallback.
 
     Updates ``state["ai_status"]`` so the chat screen can show the
-    current connection state. Always returns a string -- never raises.
+    current connection state. Always returns an AnswerResponse -- never raises.
     """
     client = state.get("ai_client")
     if client is None:
         state["ai_status"] = "offline"
-        return stub_ai_response()
+        return AnswerResponse(answer=stub_ai_response())
     try:
-        answer = client.ask(text)
+        answer = client.ask_with_sources(text)
         state["ai_status"] = "online"
         return answer
     except AIClientError as exc:
         state["ai_status"] = f"error: {exc}"
-        return f"[connection lost] {exc}  (falling back to offline stub)"
+        return AnswerResponse(
+            answer=f"[connection lost] {exc}  (falling back to offline stub)"
+        )
+
+
+def format_source(source: AnswerSource, index: int) -> str:
+    """Build a compact, readable source label for the chat transcript."""
+    metadata = source.metadata
+    name = (
+        metadata.get("filename")
+        or metadata.get("source_file")
+        or metadata.get("document")
+        or source.doc_id
+    )
+    parts = [f"[{index}] {name}", f"chunk {source.position}"]
+
+    page = metadata.get("page")
+    if page is not None:
+        parts.append(f"page {page}")
+
+    if source.similarity is not None:
+        parts.append(f"score {source.similarity:.3f}")
+
+    return " | ".join(str(part) for part in parts)
 
 
 def normalize_input_path(raw: str | None) -> str:
@@ -801,6 +830,23 @@ def screen_chat(stdscr: curses.window) -> None:
             for j, line in enumerate(wrapped):
                 pfx = prefix if j == 0 else " " * len(prefix)
                 all_lines.append((attr, pfx + line))
+            if role == "ai" and m.get("sources"):
+                source_prefix = " " * len(prefix)
+                all_lines.append(
+                    (
+                        curses.color_pair(C_DIM) | curses.A_DIM,
+                        source_prefix + "Sources:",
+                    )
+                )
+                for source_index, source in enumerate(m["sources"], start=1):
+                    source_text = format_source(source, source_index)
+                    for source_line in textwrap.wrap(source_text, wrap_w) or [""]:
+                        all_lines.append(
+                            (
+                                curses.color_pair(C_DIM) | curses.A_DIM,
+                                source_prefix + source_line,
+                            )
+                        )
             all_lines.append((curses.color_pair(C_NORMAL), ""))
 
         total_lines = len(all_lines)
@@ -870,10 +916,15 @@ def screen_chat(stdscr: curses.window) -> None:
                 )
                 stdscr.refresh()
 
-                answer = fetch_ai_response(text)
+                response = fetch_ai_response(text)
                 reply_time = datetime.now().strftime("%H:%M")
                 state["messages"].append(
-                    {"role": "ai", "text": answer, "time": reply_time}
+                    {
+                        "role": "ai",
+                        "text": response.answer,
+                        "time": reply_time,
+                        "sources": response.sources,
+                    }
                 )
         elif ch in (ord("b"), ord("B")) and not input_buf:
             break
