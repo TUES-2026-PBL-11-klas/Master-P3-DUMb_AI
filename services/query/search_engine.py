@@ -4,11 +4,13 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from services.shared.domain import Chunk
-    from services.shared.protocols import LlamaCppClient, VectorStore
+    from services.shared.protocols import AIInterface, VectorStore
 
 
 class PureVectorSearchEngine:
-    def __init__(self, client: "LlamaCppClient", vector_store: "VectorStore[Chunk]") -> None:
+    def __init__(
+        self, client: "AIInterface", vector_store: "VectorStore[Chunk]"
+    ) -> None:
         self._client = client
         self._store = vector_store
 
