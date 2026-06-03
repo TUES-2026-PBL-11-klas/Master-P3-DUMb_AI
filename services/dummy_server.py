@@ -137,6 +137,12 @@ class _QueryService(Protocol):
     def ask(self, user_id: object, question: str) -> QueryResult: ...
 
 
+class _IngestionService(Protocol):
+    """Minimal ingestion service surface the socket handler needs."""
+
+    def ingest(self, filename: str, raw: bytes, user_id: object) -> object: ...
+
+
 class _MemoryUserStore:
     """In-memory fallback used when no real store has been injected."""
 
@@ -172,6 +178,7 @@ class _MemoryUserStore:
 # Module-level hook — replace from main() / tests via set_user_store().
 _user_store: _UserStore = _MemoryUserStore()
 _query_service: _QueryService | None = None
+_ingestion_service: _IngestionService | None = None
 
 
 def set_user_store(store: _UserStore) -> None:
@@ -184,6 +191,12 @@ def set_query_service(service: _QueryService | None) -> None:
     """Swap the active query service, or disable query handling with None."""
     global _query_service
     _query_service = service
+
+
+def set_ingestion_service(service: _IngestionService | None) -> None:
+    """Swap the active ingestion service, or keep uploads validation-only."""
+    global _ingestion_service
+    _ingestion_service = service
 
 
 # Password hashing
@@ -553,10 +566,42 @@ class _DummyAIHandler(socketserver.StreamRequestHandler):
                 ),
             }
 
-        # TODO: hand `raw`, `filename`, and `user.id` to
-        # IngestionService.ingest(...) here.
+        if _ingestion_service is not None:
+            try:
+                event = _ingestion_service.ingest(filename, raw, user.id)
+            except RAGException as exc:
+                logger.warning(
+                    "upload from %s failed ingestion for '%s': %s",
+                    user.username,
+                    filename,
+                    exc,
+                )
+                return {"type": "error", "message": f"ingestion failed: {exc}"}
+            except Exception as exc:
+                logger.exception(
+                    "upload from %s failed unexpectedly for '%s'",
+                    user.username,
+                    filename,
+                )
+                return {"type": "error", "message": f"ingestion failed: {exc}"}
+
+            logger.info(
+                "upload from %s: '%s' ingested (%d bytes)",
+                user.username,
+                filename,
+                len(raw),
+            )
+            return {
+                "type": "upload_ack",
+                "filename": filename,
+                "size": len(raw),
+                "document_id": str(event.document.id),
+                "chunks": len(event.chunks),
+            }
+
         logger.info(
-            "upload from %s: '%s' accepted (%d bytes, ext=.%s) [stub: not ingested]",
+            "upload from %s: '%s' accepted (%d bytes, ext=.%s) "
+            "[validation-only: ingestion service disabled]",
             user.username,
             filename,
             len(raw),
@@ -649,6 +694,26 @@ def main() -> None:
             )
     else:
         logger.info("user store: in-memory (set MONGODB_URI to use Mongo)")
+
+    try:
+        from services.ingestion.wiring import build_ingestion_service_from_env
+
+        ingestion_service = build_ingestion_service_from_env()
+        if ingestion_service is None:
+            set_ingestion_service(None)
+            logger.info(
+                "ingestion service: disabled "
+                "(set RAG_MONGODB_URI or MONGODB_URI to enable)"
+            )
+        else:
+            set_ingestion_service(ingestion_service)
+            logger.info(
+                "ingestion service: IngestionService wired with parsers, "
+                "chunking, native embeddings and MongoVectorStore"
+            )
+    except RAGException as exc:
+        set_ingestion_service(None)
+        logger.warning("ingestion service disabled: %s", exc)
 
     try:
         from services.query.wiring import build_query_service_from_env

@@ -24,6 +24,7 @@ import pytest
 from client.ai_client import AIClient, AIClientError
 from services.dummy_server import (
     _MemoryUserStore,
+    set_ingestion_service,
     set_query_service,
     set_user_store,
     start_in_background,
@@ -68,6 +69,7 @@ def server() -> Generator[tuple[str, int], None, None]:
         srv.shutdown()
         srv.server_close()
         set_query_service(None)
+        set_ingestion_service(None)
 
 
 # Happy paths

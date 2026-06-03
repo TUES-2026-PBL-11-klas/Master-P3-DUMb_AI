@@ -24,8 +24,10 @@ import base64
 import json
 import socket
 import threading
+import uuid
 from collections.abc import Generator
 from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 
 import pytest
 
@@ -33,11 +35,13 @@ from client.ai_client import AIClient, AIClientError, MAX_UPLOAD_BYTES
 from services.dummy_server import (
     SUPPORTED_EXTENSIONS,
     _MemoryUserStore,
+    set_ingestion_service,
     set_query_service,
     set_user_store,
     start_in_background,
 )
 from services.shared.domain import QueryResult
+from services.shared.exceptions import RAGException
 
 
 # Fixtures
@@ -54,6 +58,24 @@ class _FakeQueryService:
         return QueryResult(answer=f"[test-rag] {question}")
 
 
+class _FakeIngestionService:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, bytes, object]] = []
+        self.document_id = uuid.UUID(int=123)
+
+    def ingest(self, filename: str, raw: bytes, user_id: object) -> object:
+        self.calls.append((filename, raw, user_id))
+        return SimpleNamespace(
+            document=SimpleNamespace(id=self.document_id),
+            chunks=[object(), object()],
+        )
+
+
+class _FailingIngestionService:
+    def ingest(self, filename: str, raw: bytes, user_id: object) -> object:
+        raise RAGException("parser exploded")
+
+
 @pytest.fixture
 def server() -> Generator[tuple[str, int], None, None]:
     # Fresh in-memory user store per test so tests don't see each other.
@@ -68,6 +90,46 @@ def server() -> Generator[tuple[str, int], None, None]:
         srv.shutdown()
         srv.server_close()
         set_query_service(None)
+        set_ingestion_service(None)
+
+
+@pytest.fixture
+def server_with_ingestion() -> Generator[
+    tuple[str, int, _FakeIngestionService],
+    None,
+    None,
+]:
+    set_user_store(_MemoryUserStore())
+    set_query_service(_FakeQueryService())
+    ingestion = _FakeIngestionService()
+    set_ingestion_service(ingestion)
+
+    port = _free_port()
+    srv, _thread = start_in_background(host="127.0.0.1", port=port)
+    try:
+        yield "127.0.0.1", port, ingestion
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        set_query_service(None)
+        set_ingestion_service(None)
+
+
+@pytest.fixture
+def server_with_failing_ingestion() -> Generator[tuple[str, int], None, None]:
+    set_user_store(_MemoryUserStore())
+    set_query_service(_FakeQueryService())
+    set_ingestion_service(_FailingIngestionService())
+
+    port = _free_port()
+    srv, _thread = start_in_background(host="127.0.0.1", port=port)
+    try:
+        yield "127.0.0.1", port
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        set_query_service(None)
+        set_ingestion_service(None)
 
 
 @pytest.fixture
@@ -82,6 +144,7 @@ def server_without_query_service() -> Generator[tuple[str, int], None, None]:
     finally:
         srv.shutdown()
         srv.server_close()
+        set_ingestion_service(None)
 
 
 def _authed_client(
@@ -119,6 +182,36 @@ class TestUploadHappyPath:
             assert ack["type"] == "upload_ack"
             assert ack["filename"] == "notes.txt"
             assert ack["size"] == len(b"hello over the wire\n")
+
+    def test_upload_invokes_ingestion_service(
+        self,
+        server_with_ingestion: tuple[str, int, _FakeIngestionService],
+    ) -> None:
+        host, port, ingestion = server_with_ingestion
+        payload = b"hello over the wire\n"
+        with _authed_client(host, port, "alice") as c:
+            ack = c.upload("subdir/notes.txt", payload)
+
+            assert ack["type"] == "upload_ack"
+            assert ack["filename"] == "notes.txt"
+            assert ack["size"] == len(payload)
+            assert ack["document_id"] == str(ingestion.document_id)
+            assert ack["chunks"] == 2
+
+        assert len(ingestion.calls) == 1
+        filename, raw, user_id = ingestion.calls[0]
+        assert filename == "notes.txt"
+        assert raw == payload
+        assert user_id is not None
+
+    def test_upload_surfaces_ingestion_failure(
+        self,
+        server_with_failing_ingestion: tuple[str, int],
+    ) -> None:
+        host, port = server_with_failing_ingestion
+        with _authed_client(host, port, "alice") as c:
+            with pytest.raises(AIClientError, match="ingestion failed"):
+                c.upload("notes.txt", b"hello\n")
 
     def test_md_upload_returns_ack(self, server: tuple[str, int]) -> None:
         host, port = server
