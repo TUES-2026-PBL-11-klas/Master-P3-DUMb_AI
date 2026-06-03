@@ -663,7 +663,8 @@ def main() -> None:
         else:
             set_query_service(query_service)
             logger.info(
-                "query service: QueryService wired with MongoVectorStore + Ollama"
+                "query service: QueryService wired with MongoVectorStore "
+                "+ native model clients"
             )
     except RAGException as exc:
         set_query_service(None)

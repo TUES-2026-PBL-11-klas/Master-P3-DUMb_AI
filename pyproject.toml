@@ -11,3 +11,28 @@ packages = ["services"]
 strict = false  # Enable later
 ignore_missing_imports = true
 disallow_untyped_defs = true
+
+[project]
+name = "dumb-ai"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "bcrypt",
+    "nltk",
+    "pymongo",
+    "tiktoken",
+]
+
+[project.optional-dependencies]
+mac = [
+    "huggingface_hub",
+    "mlx-embeddings",
+    "mlx-lm",
+]
+linux = [
+    "huggingface_hub",
+    "llama-cpp-python",
+]
+dev = [
+    "pytest",
+]

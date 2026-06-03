@@ -45,7 +45,7 @@ class QueryService:
     Orchestrates the RAG query flow.
 
     Dependencies are injected so unit tests can use fake clients and stores,
-    while production can wire MongoVectorStore and an Ollama-backed model client.
+    while production can wire MongoVectorStore and native model clients.
     """
 
     def __init__(
