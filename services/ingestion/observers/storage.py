@@ -96,7 +96,7 @@ class StorageObserver:
         if missing:
             message = (
                 f"StorageObserver: {len(missing)} of {len(chunks)} chunk(s) "
-                f"have no embedding (positions={missing[:5]}...) — "
+                f"have no embedding (positions={missing[:5]!r}{'...' if len(missing) > 5 else ''}) — "
                 f"EmbeddingObserver must run before StorageObserver"
             )
             logger.error(message)
