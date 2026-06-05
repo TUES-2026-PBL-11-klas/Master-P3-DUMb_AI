@@ -107,7 +107,7 @@ class VectorStore(Protocol[T_inv]):
 
 @runtime_checkable
 class LlamaCppClient(Protocol):
-    """Structural interface for the llama.cpp HTTP embedding client."""
+    """Structural interface for the llama.cpp embedding client."""
 
     def embed(self, text: str) -> list[float]:
         """Return a single embedding vector for *text*."""
