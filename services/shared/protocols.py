@@ -1,5 +1,5 @@
 from __future__ import annotations
-
+import uuid
 from typing import TYPE_CHECKING, ClassVar, Protocol, TypeVar, runtime_checkable
 
 if TYPE_CHECKING:
@@ -103,3 +103,28 @@ class VectorStore(Protocol[T_inv]):
         Results are ordered by descending similarity score.
         """
         ...
+
+
+@runtime_checkable
+class LlamaCppClient(Protocol):
+    """Structural interface for the llama.cpp embedding client."""
+
+    def embed(self, text: str) -> list[float]:
+        """Return a single embedding vector for *text*."""
+        ...
+
+    def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        """Return one embedding vector per entry in *texts*."""
+        ...
+
+
+@runtime_checkable
+class IngestionServiceProtocol(Protocol):
+    """Structural interface for an ingestion backend used by dummy_server."""
+
+    @property
+    def supported_extensions(self) -> list[str]: ...
+
+    def ingest(
+        self, filename: str, raw: bytes, user_id: uuid.UUID
+    ) -> "IngestionEvent": ...

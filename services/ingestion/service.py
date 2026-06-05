@@ -163,6 +163,17 @@ class IngestionService:
         """Read-only view of the current observer chain (for tests / diagnostics)."""
         return tuple(self._observers)
 
+    @property
+    def supported_extensions(self) -> list[str]:
+        """
+        Extensions accepted by the registered parsers.
+
+        Delegates to the ParserRegistry so the WebSocket/socket layer can
+        derive its upload allow-list from the live registry instead of
+        hard-coding a set that could drift from the actual parsers.
+        """
+        return self._registry.supported_extensions
+
     # Single-document ingestion
 
     def ingest(
