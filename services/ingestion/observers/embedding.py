@@ -86,6 +86,7 @@ class EmbeddingObserver:
             "EmbeddingObserver: embedding %d chunk(s) from '%s' with model '%s'",
             len(chunks),
             event.document.filename,
+            self._model,
         )
         texts = [chunk.text for chunk in chunks]
 
@@ -112,6 +113,7 @@ class EmbeddingObserver:
             "EmbeddingObserver: successfully embedded %d chunk(s) "
             "(%d-dim vectors) for '%s'",
             len(chunks),
+            len(vectors[0]) if vectors else 0,
             event.document.filename,
         )
 
