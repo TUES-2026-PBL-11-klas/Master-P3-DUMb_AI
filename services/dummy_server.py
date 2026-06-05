@@ -89,13 +89,12 @@ import socket
 import socketserver
 import threading
 import time
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import Any, Protocol
 
 from services.shared.domain import IngestionStatus, UserAcc
 from services.shared.exceptions import AuthError, RAGException, StorageError
+from services.shared.protocols import IngestionServiceProtocol
 
-if TYPE_CHECKING:
-    from services.ingestion.service import IngestionService
 
 # Configuration
 DEFAULT_HOST = "127.0.0.1"
@@ -199,10 +198,10 @@ def set_user_store(store: _UserStore) -> None:
 
 # None means "no pipeline wired" → _handle_upload falls back to the validate-only
 # stub (so offline demos and the socket integration tests still get an ack).
-_ingestion_service: "IngestionService | None" = None
+_ingestion_service: IngestionServiceProtocol | None = None
 
 
-def set_ingestion_service(service: "IngestionService | None") -> None:
+def set_ingestion_service(service: IngestionServiceProtocol | None) -> None:
     """Swap the active ingestion pipeline (used by main() and by tests)."""
     global _ingestion_service
     _ingestion_service = service
