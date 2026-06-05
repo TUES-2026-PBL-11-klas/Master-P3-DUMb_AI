@@ -689,26 +689,29 @@ def main() -> None:
     else:
         logger.info("user store: in-memory (set MONGODB_URI to use Mongo)")
 
-    # Wire the real ingestion pipeline when both backends are configured.
-    # Without them, uploads still validate and ack (stub) so demos work.
-    llama_url = os.environ.get("LLAMA_CPP_URL")
-    if mongo_uri and llama_url:
+    # Wire the real ingestion pipeline when MongoDB is configured. The
+    # embedding model is loaded in-process by PlatformEmbeddingClient (mlx on
+    # macOS, llama_cpp on Linux), so no embedding server URL is needed; an
+    # optional BGE_MODEL_PATH overrides the Linux .gguf location. Without
+    # MONGODB_URI, uploads still validate and ack (stub) so demos work.
+    if mongo_uri:
         try:
             from services.ingestion.composition import build_ingestion_service
 
-            set_ingestion_service(build_ingestion_service(mongo_uri, llama_url))
-            logger.info(
-                "ingestion pipeline: ON (mongo=%s, llama=%s)", mongo_uri, llama_url
+            set_ingestion_service(
+                build_ingestion_service(
+                    mongo_uri,
+                    bge_model_path=os.environ.get("BGE_MODEL_PATH"),
+                )
             )
-        except RAGException as exc:
+            logger.info("ingestion pipeline: ON (mongo=%s)", mongo_uri)
+        except (RAGException, OSError) as exc:
             logger.warning(
                 "could not build ingestion pipeline — uploads will validate-only: %s",
                 exc,
             )
     else:
-        logger.info(
-            "ingestion pipeline: OFF (set MONGODB_URI and LLAMA_CPP_URL to enable)"
-        )
+        logger.info("ingestion pipeline: OFF (set MONGODB_URI to enable)")
 
     serve_forever(args.host, args.port)
 

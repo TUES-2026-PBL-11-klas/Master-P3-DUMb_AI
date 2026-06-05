@@ -18,7 +18,7 @@ ChunkingObserver, which loads tiktoken's cl100k_base encoding (cached
 after first download) — exactly as test_chunker.py already does.
 
 build_ingestion_service() (the production variant that builds a real
-MongoVectorStore + LlamaCppEmbeddingClient from a URI/URL) is intentionally
+MongoVectorStore + in-process PlatformEmbeddingClient) is intentionally
 NOT unit-tested here: it needs the live backends and is covered by manual
 smoke testing + the socket integration suite.
 """
@@ -55,7 +55,7 @@ def store() -> MagicMock:
 
 @pytest.fixture
 def embed_client() -> MagicMock:
-    """A MagicMock that satisfies LlamaCppClient structurally."""
+    """A MagicMock that satisfies AIInterface structurally."""
     c = MagicMock()
     c.embed = MagicMock(return_value=[0.0] * 1024)
     c.embed_batch = MagicMock(side_effect=lambda texts: [[0.0] * 1024 for _ in texts])
