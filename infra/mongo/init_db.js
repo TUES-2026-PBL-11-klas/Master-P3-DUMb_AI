@@ -6,6 +6,7 @@ const collections = [
   "documents",
   "document_chunks",
   "queries",
+  "schema_versions",
 ];
 
 for (const collectionName of collections) {
@@ -28,6 +29,18 @@ database.document_chunks.createIndex(
 
 database.queries.createIndex({ user_id: 1 });
 database.queries.createIndex({ created_at: -1 });
+
+database.schema_versions.updateOne(
+  { _id: "schema" },
+  {
+    $set: {
+      version: 1,
+      updated_at: new Date(),
+      description: "Initial MongoDB document model for DUMb_AI",
+    },
+  },
+  { upsert: true },
+);
 
 const searchIndexName = "chunk_embedding_vector_index";
 const existingSearchIndexes = database.document_chunks

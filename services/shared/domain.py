@@ -51,7 +51,6 @@ class Document:
     content: str
     filename: str
     uploaded_at: datetime
-    content_type: str = "text/plain"
     status: DocumentStatus = DocumentStatus.PARSED
     error_message: str | None = None
     schema_version: int = 1
