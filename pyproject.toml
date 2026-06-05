@@ -11,3 +11,32 @@ packages = ["services"]
 strict = false  # Enable later
 ignore_missing_imports = true
 disallow_untyped_defs = true
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "dumb-ai"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "tiktoken",
+    "nltk",
+    "pymongo",
+    "bcrypt",
+]
+
+[project.optional-dependencies]
+mac = [
+    "mlx-embeddings",
+    "mlx-lm",
+    "huggingface_hub",
+]
+linux = [
+    "llama-cpp-python",
+    "huggingface_hub",
+]
+dev = [
+    "pytest",
+]
