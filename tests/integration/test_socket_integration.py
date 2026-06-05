@@ -35,6 +35,7 @@ from client.ai_client import AIClient, AIClientError, MAX_UPLOAD_BYTES
 from services.dummy_server import (
     SUPPORTED_EXTENSIONS,
     _MemoryUserStore,
+    set_document_store,
     set_ingestion_service,
     set_query_service,
     set_user_store,
@@ -76,10 +77,27 @@ class _FailingIngestionService:
         raise RAGException("parser exploded")
 
 
+class _FakeDocumentStore:
+    def __init__(self) -> None:
+        self.calls: list[object] = []
+
+    def list_by_user(self, user_id: object) -> list[dict[str, object]]:
+        self.calls.append(user_id)
+        return [
+            {
+                "document_id": str(uuid.UUID(int=456)),
+                "filename": "networking.md",
+                "uploaded_at": "2026-06-05T10:15:00",
+                "status": "ready",
+            }
+        ]
+
+
 @pytest.fixture
 def server() -> Generator[tuple[str, int], None, None]:
     # Fresh in-memory user store per test so tests don't see each other.
     set_user_store(_MemoryUserStore())
+    set_document_store(None)
     set_query_service(_FakeQueryService())
 
     port = _free_port()
@@ -89,6 +107,7 @@ def server() -> Generator[tuple[str, int], None, None]:
     finally:
         srv.shutdown()
         srv.server_close()
+        set_document_store(None)
         set_query_service(None)
         set_ingestion_service(None)
 
@@ -100,6 +119,7 @@ def server_with_ingestion() -> Generator[
     None,
 ]:
     set_user_store(_MemoryUserStore())
+    set_document_store(None)
     set_query_service(_FakeQueryService())
     ingestion = _FakeIngestionService()
     set_ingestion_service(ingestion)
@@ -111,6 +131,7 @@ def server_with_ingestion() -> Generator[
     finally:
         srv.shutdown()
         srv.server_close()
+        set_document_store(None)
         set_query_service(None)
         set_ingestion_service(None)
 
@@ -118,6 +139,7 @@ def server_with_ingestion() -> Generator[
 @pytest.fixture
 def server_with_failing_ingestion() -> Generator[tuple[str, int], None, None]:
     set_user_store(_MemoryUserStore())
+    set_document_store(None)
     set_query_service(_FakeQueryService())
     set_ingestion_service(_FailingIngestionService())
 
@@ -128,6 +150,7 @@ def server_with_failing_ingestion() -> Generator[tuple[str, int], None, None]:
     finally:
         srv.shutdown()
         srv.server_close()
+        set_document_store(None)
         set_query_service(None)
         set_ingestion_service(None)
 
@@ -135,6 +158,7 @@ def server_with_failing_ingestion() -> Generator[tuple[str, int], None, None]:
 @pytest.fixture
 def server_without_query_service() -> Generator[tuple[str, int], None, None]:
     set_user_store(_MemoryUserStore())
+    set_document_store(None)
     set_query_service(None)
 
     port = _free_port()
@@ -144,6 +168,30 @@ def server_without_query_service() -> Generator[tuple[str, int], None, None]:
     finally:
         srv.shutdown()
         srv.server_close()
+        set_document_store(None)
+        set_ingestion_service(None)
+
+
+@pytest.fixture
+def server_with_document_store() -> Generator[
+    tuple[str, int, _FakeDocumentStore],
+    None,
+    None,
+]:
+    set_user_store(_MemoryUserStore())
+    store = _FakeDocumentStore()
+    set_document_store(store)
+    set_query_service(_FakeQueryService())
+
+    port = _free_port()
+    srv, _thread = start_in_background(host="127.0.0.1", port=port)
+    try:
+        yield "127.0.0.1", port, store
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        set_document_store(None)
+        set_query_service(None)
         set_ingestion_service(None)
 
 
@@ -169,6 +217,40 @@ def _raw_send(host: str, port: int, message: dict[str, object]) -> dict[str, obj
     decoded = json.loads(line)
     assert isinstance(decoded, dict)
     return decoded
+
+
+# Document listing
+
+
+class TestDocumentListing:
+    def test_authenticated_user_can_list_documents(
+        self,
+        server_with_document_store: tuple[str, int, _FakeDocumentStore],
+    ) -> None:
+        host, port, store = server_with_document_store
+
+        with _authed_client(host, port, "alice") as c:
+            documents = c.list_documents()
+
+        assert documents == [
+            {
+                "document_id": str(uuid.UUID(int=456)),
+                "filename": "networking.md",
+                "uploaded_at": "2026-06-05T10:15:00",
+                "status": "ready",
+            }
+        ]
+        assert len(store.calls) == 1
+
+    def test_raw_document_list_without_auth_rejected(
+        self,
+        server_with_document_store: tuple[str, int, _FakeDocumentStore],
+    ) -> None:
+        host, port, _store = server_with_document_store
+
+        reply = _raw_send(host, port, {"type": "documents"})
+
+        assert reply == {"type": "error", "message": "not authenticated"}
 
 
 # Upload — happy path

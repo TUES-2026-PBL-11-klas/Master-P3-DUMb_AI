@@ -12,8 +12,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Protocol
 
+from services.db.mongo_document_store import MongoDocumentStore
 from services.db.mongo_vector_store import MongoVectorStore
 from services.ingestion.observers.chunking import ChunkingObserver
+from services.ingestion.observers.document_storage import DocumentStorageObserver
 from services.ingestion.observers.embedding import EmbeddingObserver
 from services.ingestion.observers.storage import StorageObserver
 from services.ingestion.parsers.markdown import MarkdownParser
@@ -53,6 +55,16 @@ class VectorStoreFactory(Protocol):
     ) -> VectorStore[Chunk]: ...
 
 
+class DocumentStoreFactory(Protocol):
+    def __call__(
+        self,
+        uri: str,
+        *,
+        db_name: str,
+        collection_name: str,
+    ) -> object: ...
+
+
 class EmbeddingClientFactory(Protocol):
     def __call__(
         self,
@@ -68,6 +80,7 @@ class EmbeddingClientFactory(Protocol):
 class IngestionRuntimeConfig:
     mongo_uri: str
     mongo_db_name: str = DEFAULT_DB_NAME
+    document_collection: str = "documents"
     chunk_collection: str = DEFAULT_CHUNK_COLLECTION
     vector_index: str = DEFAULT_VECTOR_INDEX
     mac_embedding_model: str = DEFAULT_MAC_EMBEDDING_MODEL
@@ -91,6 +104,7 @@ class IngestionRuntimeConfig:
         return cls(
             mongo_uri=mongo_uri,
             mongo_db_name=env.get("RAG_MONGODB_DB", DEFAULT_DB_NAME),
+            document_collection=env.get("RAG_DOCUMENT_COLLECTION", "documents"),
             chunk_collection=env.get("RAG_CHUNK_COLLECTION", DEFAULT_CHUNK_COLLECTION),
             vector_index=env.get("RAG_VECTOR_INDEX", DEFAULT_VECTOR_INDEX),
             mac_embedding_model=env.get(
@@ -129,6 +143,7 @@ def build_ingestion_service(
     config: IngestionRuntimeConfig,
     *,
     vector_store_factory: VectorStoreFactory = MongoVectorStore.from_uri,
+    document_store_factory: DocumentStoreFactory = MongoDocumentStore.from_uri,
     embedding_client_factory: EmbeddingClientFactory = PlatformEmbeddingClient,
 ) -> IngestionService:
     registry: ParserRegistry[Document] = ParserRegistry()
@@ -147,6 +162,11 @@ def build_ingestion_service(
         collection_name=config.chunk_collection,
         index_name=config.vector_index,
     )
+    document_store = document_store_factory(
+        config.mongo_uri,
+        db_name=config.mongo_db_name,
+        collection_name=config.document_collection,
+    )
 
     return IngestionService(
         registry=registry,
@@ -158,6 +178,7 @@ def build_ingestion_service(
                 batch_size=config.embed_batch_size,
             ),
             StorageObserver(vector_store),
+            DocumentStorageObserver(document_store),
         ],
         max_workers=config.max_workers,
     )
@@ -167,6 +188,7 @@ def build_ingestion_service_from_env(
     environ: Mapping[str, str] | None = None,
     *,
     vector_store_factory: VectorStoreFactory = MongoVectorStore.from_uri,
+    document_store_factory: DocumentStoreFactory = MongoDocumentStore.from_uri,
     embedding_client_factory: EmbeddingClientFactory = PlatformEmbeddingClient,
 ) -> IngestionService | None:
     config = IngestionRuntimeConfig.from_env(environ)
@@ -175,6 +197,7 @@ def build_ingestion_service_from_env(
     return build_ingestion_service(
         config,
         vector_store_factory=vector_store_factory,
+        document_store_factory=document_store_factory,
         embedding_client_factory=embedding_client_factory,
     )
 

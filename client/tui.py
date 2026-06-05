@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-DocChat TUI - AI-powered document chat interface (stub/prototype)
+DocChat TUI - AI-powered document chat interface.
 
 Login and signup are real: credentials are sent to the dummy server over
 a newline-delimited JSON socket, where they are hashed and stored. The
@@ -94,7 +94,7 @@ def fetch_ai_response(text: str) -> AnswerResponse:
     except AIClientError as exc:
         state["ai_status"] = f"error: {exc}"
         return AnswerResponse(
-            answer=f"[connection lost] {exc}  (falling back to offline stub)"
+            answer=f"[server error] {exc}"
         )
 
 
@@ -117,6 +117,43 @@ def format_source(source: AnswerSource, index: int) -> str:
         parts.append(f"score {source.similarity:.3f}")
 
     return " | ".join(str(part) for part in parts)
+
+
+def refresh_documents_from_server() -> tuple[bool, str]:
+    """Reload the authenticated user's documents from the server, if available."""
+    client = state.get("ai_client")
+    if client is None:
+        return False, "offline"
+
+    try:
+        documents = client.list_documents()
+    except AIClientError as exc:
+        state["ai_status"] = f"error: {exc}"
+        return False, str(exc)
+
+    state["documents"] = [_document_summary_for_tui(doc) for doc in documents]
+    state["ai_status"] = f"online ({client.host}:{client.port})"
+    return True, ""
+
+
+def _document_summary_for_tui(doc: dict[str, Any]) -> dict[str, Any]:
+    uploaded_at = str(doc.get("uploaded_at") or "")
+    if "T" in uploaded_at:
+        uploaded_at = uploaded_at.replace("T", " ")[:16]
+    elif not uploaded_at:
+        uploaded_at = "unknown"
+
+    size = doc.get("size", 0)
+    if not isinstance(size, (int, float)):
+        size = 0
+
+    return {
+        "id": str(doc.get("document_id") or doc.get("id") or ""),
+        "name": str(doc.get("filename") or doc.get("name") or ""),
+        "size": int(size),
+        "uploaded_at": uploaded_at,
+        "status": str(doc.get("status") or ""),
+    }
 
 
 def normalize_input_path(raw: str | None) -> str:
@@ -204,13 +241,15 @@ def upload_file_to_server(path: str) -> tuple[bool, str]:
         return False, f"Upload failed: {exc}"
 
     state["ai_status"] = f"online ({client.host}:{client.port})"
-    state["documents"].append(
-        {
-            "name": ack.get("filename", name),
-            "size": ack.get("size", size),
-            "uploaded_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
-        }
-    )
+    refreshed, _ = refresh_documents_from_server()
+    if not refreshed:
+        state["documents"].append(
+            {
+                "name": ack.get("filename", name),
+                "size": ack.get("size", size),
+                "uploaded_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            }
+        )
     return True, f"'{name}' uploaded ({size} bytes)"
 
 
@@ -496,6 +535,7 @@ def screen_login(stdscr: curses.window) -> None:
 
         state["username"] = confirmed
         state["logged_in"] = True
+        refresh_documents_from_server()
         safe_addstr(
             stdscr,
             by + 7,
@@ -612,6 +652,7 @@ def screen_signup(stdscr: curses.window) -> None:
 
         state["username"] = confirmed
         state["logged_in"] = True
+        refresh_documents_from_server()
         safe_addstr(
             stdscr,
             by + 10,

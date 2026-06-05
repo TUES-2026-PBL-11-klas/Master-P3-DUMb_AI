@@ -24,6 +24,7 @@ import pytest
 from client.ai_client import AIClient, AIClientError
 from services.dummy_server import (
     _MemoryUserStore,
+    set_document_store,
     set_ingestion_service,
     set_query_service,
     set_user_store,
@@ -59,6 +60,7 @@ class _FakeQueryService:
 def server() -> Generator[tuple[str, int], None, None]:
     # Fresh in-memory user store per test so tests don't see each other.
     set_user_store(_MemoryUserStore())
+    set_document_store(None)
     set_query_service(_FakeQueryService())
 
     port = _free_port()
@@ -68,6 +70,7 @@ def server() -> Generator[tuple[str, int], None, None]:
     finally:
         srv.shutdown()
         srv.server_close()
+        set_document_store(None)
         set_query_service(None)
         set_ingestion_service(None)
 

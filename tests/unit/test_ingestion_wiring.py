@@ -31,6 +31,10 @@ class FakeVectorStore:
     pass
 
 
+class FakeDocumentStore:
+    pass
+
+
 class FakeChunkingObserver:
     def __init__(self, chunk_size: int) -> None:
         self.chunk_size = chunk_size
@@ -136,7 +140,9 @@ def test_build_ingestion_service_wires_pipeline(monkeypatch: pytest.MonkeyPatch)
 
     created_clients: list[FakeEmbeddingClient] = []
     created_stores: list[FakeVectorStore] = []
+    created_document_stores: list[FakeDocumentStore] = []
     vector_factory_calls: list[tuple[str, str, str, str]] = []
+    document_factory_calls: list[tuple[str, str, str]] = []
 
     def embedding_factory(
         *,
@@ -165,6 +171,17 @@ def test_build_ingestion_service_wires_pipeline(monkeypatch: pytest.MonkeyPatch)
         created_stores.append(store)
         return store
 
+    def document_store_factory(
+        uri: str,
+        *,
+        db_name: str,
+        collection_name: str,
+    ) -> FakeDocumentStore:
+        document_factory_calls.append((uri, db_name, collection_name))
+        store = FakeDocumentStore()
+        created_document_stores.append(store)
+        return store
+
     service = build_ingestion_service(
         IngestionRuntimeConfig(
             mongo_uri="mongodb://localhost:27018",
@@ -177,10 +194,11 @@ def test_build_ingestion_service_wires_pipeline(monkeypatch: pytest.MonkeyPatch)
             max_workers=2,
         ),
         vector_store_factory=vector_store_factory,
+        document_store_factory=document_store_factory,
         embedding_client_factory=embedding_factory,
     )
 
-    assert len(service.observers) == 3
+    assert len(service.observers) == 4
     assert isinstance(service.observers[0], FakeChunkingObserver)
     assert service.observers[0].chunk_size == 320
     assert isinstance(service.observers[1], FakeEmbeddingObserver)
@@ -188,6 +206,7 @@ def test_build_ingestion_service_wires_pipeline(monkeypatch: pytest.MonkeyPatch)
     assert service.observers[1].batch_size == 4
     assert isinstance(service.observers[2], FakeStorageObserver)
     assert service.observers[2].store is created_stores[0]
+    assert service.observers[3]._store is created_document_stores[0]
     assert vector_factory_calls == [
         (
             "mongodb://localhost:27018",
@@ -195,6 +214,9 @@ def test_build_ingestion_service_wires_pipeline(monkeypatch: pytest.MonkeyPatch)
             "document_chunks",
             "chunk_embedding_vector_index",
         )
+    ]
+    assert document_factory_calls == [
+        ("mongodb://localhost:27018", "dumb_ai", "documents")
     ]
     service.close()
 

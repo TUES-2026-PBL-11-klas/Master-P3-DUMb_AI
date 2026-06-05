@@ -11,6 +11,7 @@ Wire protocol (see services.dummy_server for the server side):
         {"type": "login",  "username": <str>, "password": <str>}
         {"type": "signup", "username": <str>, "password": <str>}
         {"type": "logout"}
+        {"type": "documents"}                         # session-authenticated
         {"type": "query",  "text": <str>}            # session-authenticated
         {"type": "upload", "filename": <str>,        # session-authenticated
 
@@ -20,6 +21,7 @@ Wire protocol (see services.dummy_server for the server side):
         {"type": "pong"}
         {"type": "auth_ok",    "username": <str>}
         {"type": "logout_ok"}
+        {"type": "documents",   "documents": <list>}
         {"type": "answer",     "text": <str>, "sources": <list>}
         {"type": "upload_ack", "filename": <str>, "size": <int>}
         {"type": "error",      "message": <str>}
@@ -361,6 +363,29 @@ class AIClient:
         kind = reply.get("type")
         if kind == "upload_ack":
             return reply
+        if kind == "error":
+            raise AIClientError(f"server error: {reply.get('message', 'unknown')}")
+        raise AIClientError(f"unexpected reply type: {kind!r}")
+
+    def list_documents(self) -> list[dict[str, Any]]:
+        """
+        Return uploaded document metadata for the authenticated user.
+
+        Raises:
+            AIClientError: on missing session, transport failure, or server error.
+        """
+        if not self.is_authenticated:
+            raise AIClientError("not authenticated - call login() or signup() first")
+
+        reply = self._authed_round_trip({"type": "documents"})
+        kind = reply.get("type")
+        if kind == "documents":
+            documents = reply.get("documents", [])
+            if not isinstance(documents, list):
+                raise AIClientError(f"non-list documents field: {documents!r}")
+            return [
+                doc for doc in documents if isinstance(doc, dict)
+            ]
         if kind == "error":
             raise AIClientError(f"server error: {reply.get('message', 'unknown')}")
         raise AIClientError(f"unexpected reply type: {kind!r}")

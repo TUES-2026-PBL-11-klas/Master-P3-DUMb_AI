@@ -15,6 +15,7 @@ Client -> Server:
     {"type": "login",  "username": "<str>", "password": "<str>"}
     {"type": "signup", "username": "<str>", "password": "<str>"}
     {"type": "logout"}                              # optional; ends the session
+    {"type": "documents"}                           # session-authenticated
     {"type": "query",  "text": "<str>"}             # session-authenticated
     {"type": "upload", "filename": "<str>",         # session-authenticated
                        "bytes_b64": "<base64 str>"}
@@ -23,6 +24,7 @@ Server -> Client:
     {"type": "pong"}
     {"type": "auth_ok",    "username": "<str>"}     # reply to login / signup
     {"type": "logout_ok"}
+    {"type": "documents",   "documents": <list>}
     {"type": "answer",     "text": "<str>"}         # reply to query
     {"type": "upload_ack", "filename": "<str>", "size": <int>}
     {"type": "error",      "message": "<str>"}      # malformed request,
@@ -143,6 +145,12 @@ class _IngestionService(Protocol):
     def ingest(self, filename: str, raw: bytes, user_id: object) -> object: ...
 
 
+class _DocumentStore(Protocol):
+    """Minimal document metadata store surface the socket handler needs."""
+
+    def list_by_user(self, user_id: object) -> list[dict[str, Any]]: ...
+
+
 class _MemoryUserStore:
     """In-memory fallback used when no real store has been injected."""
 
@@ -179,6 +187,7 @@ class _MemoryUserStore:
 _user_store: _UserStore = _MemoryUserStore()
 _query_service: _QueryService | None = None
 _ingestion_service: _IngestionService | None = None
+_document_store: _DocumentStore | None = None
 
 
 def set_user_store(store: _UserStore) -> None:
@@ -197,6 +206,12 @@ def set_ingestion_service(service: _IngestionService | None) -> None:
     """Swap the active ingestion service, or keep uploads validation-only."""
     global _ingestion_service
     _ingestion_service = service
+
+
+def set_document_store(store: _DocumentStore | None) -> None:
+    """Swap the active document store, or disable document listing."""
+    global _document_store
+    _document_store = store
 
 
 # Password hashing
@@ -419,6 +434,11 @@ class _DummyAIHandler(socketserver.StreamRequestHandler):
             return self._auth("signup", msg)
         if kind == "logout":
             return self._logout()
+        if kind == "documents":
+            user = self._require_session()
+            if user is None:
+                return {"type": "error", "message": "not authenticated"}
+            return self._list_documents(user)
         if kind == "query":
             user = self._require_session()
             if user is None:
@@ -500,6 +520,25 @@ class _DummyAIHandler(socketserver.StreamRequestHandler):
             "text": result.answer,
             "sources": self._serialize_sources(result),
         }
+
+    def _list_documents(self, user: UserAcc) -> dict[str, Any]:
+        if _document_store is None:
+            logger.warning(
+                "document list from %s returned empty: document store is not configured",
+                user.username,
+            )
+            return {"type": "documents", "documents": []}
+
+        try:
+            documents = _document_store.list_by_user(user.id)
+        except StorageError as exc:
+            logger.warning("document list from %s failed: %s", user.username, exc)
+            return {"type": "error", "message": str(exc)}
+        except Exception as exc:
+            logger.exception("document list from %s failed unexpectedly", user.username)
+            return {"type": "error", "message": f"document list failed: {exc}"}
+
+        return {"type": "documents", "documents": documents}
 
     @staticmethod
     def _serialize_sources(result: QueryResult) -> list[dict[str, Any]]:
@@ -682,18 +721,23 @@ def main() -> None:
     mongo_uri = os.environ.get("MONGODB_URI")
     if mongo_uri:
         try:
+            from services.db.mongo_document_store import MongoDocumentStore
             from services.db.mongo_user_store import MongoUserStore
 
             set_user_store(MongoUserStore.from_uri(mongo_uri))
+            set_document_store(MongoDocumentStore.from_uri(mongo_uri))
             logger.info("user store: MongoUserStore (%s)", mongo_uri)
+            logger.info("document store: MongoDocumentStore (%s)", mongo_uri)
         except StorageError as exc:
             logger.warning(
                 "could not connect to %s — falling back to in-memory user store: %s",
                 mongo_uri,
                 exc,
             )
+            set_document_store(None)
     else:
         logger.info("user store: in-memory (set MONGODB_URI to use Mongo)")
+        set_document_store(None)
 
     try:
         from services.ingestion.wiring import build_ingestion_service_from_env
