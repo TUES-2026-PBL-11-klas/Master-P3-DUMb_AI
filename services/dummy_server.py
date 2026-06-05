@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-DocChat socket AI server.
+DocChat dummy AI server.
 
-A tiny TCP socket server that exposes the backend protocol used by the TUI.
-It speaks newline-delimited JSON and delegates real queries to an injected
-QueryService.
+A tiny TCP socket server that pretends to be the AI backend. It speaks a
+newline-delimited JSON protocol so the TUI (or any other client) can be
+developed and demoed before the real RAG pipeline is wired up.
 
 Protocol
 --------
@@ -26,7 +26,9 @@ Server -> Client:
     {"type": "logout_ok"}
     {"type": "documents",   "documents": <list>}
     {"type": "answer",     "text": "<str>"}         # reply to query
-    {"type": "upload_ack", "filename": "<str>", "size": <int>}
+    {"type": "upload_ack", "filename": "<str>", "size": <int>,
+                           "chunks": <int>,         # optional — present only
+                           "doc_id": "<str>"}       # when a pipeline is wired
     {"type": "error",      "message": "<str>"}      # malformed request,
                                                     # auth failure, missing
                                                     # session, or upload
@@ -57,11 +59,14 @@ Auth design notes:
       message wording.
 
 Upload design note:
-    The upload handler is intentionally a *stub* — it validates the
-    message shape, base64-decodes the payload, checks the size cap and
-    the allow-list of extensions, and returns an ack. It does NOT yet
-    feed the bytes into IngestionService (parser → chunk → embed →
-    store). Wiring that up is the next step; the protocol is stable.
+    The upload handler validates the message shape, base64-decodes the
+    payload, checks the size cap and the allow-list of extensions, then —
+    if an IngestionService has been wired via set_ingestion_service() —
+    feeds the bytes into it for the parse → chunk → embed → store pipeline
+    and returns an ack carrying the chunk count and document id. When no
+    pipeline is wired (offline demos, unit tests), it falls back to a
+    validate-only stub that returns a plain ack. The protocol is stable
+    across both modes — the extra ack fields are optional.
 
 Run it
 ------
@@ -80,31 +85,36 @@ import hmac
 import json
 import logging
 import os
+import random
 import secrets
 import socket
 import socketserver
 import threading
+import time
 from typing import Any, Protocol
 
-from services.shared.domain import QueryResult, UserAcc
-from services.shared.exceptions import (
-    AuthError,
-    QueryError,
-    RAGException,
-    StorageError,
-)
+from services.shared.domain import IngestionStatus, UserAcc
+from services.shared.exceptions import AuthError, RAGException, StorageError
+from services.shared.protocols import IngestionServiceProtocol
+
 
 # Configuration
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 5555
 
+# Simulated "thinking" delay so the UI feels like it's talking to a real model.
+MIN_THINK_SECONDS = 0.2
+MAX_THINK_SECONDS = 0.8
+
 # Hard upload size cap
 # ("Hard upload size cap (default: 5 MB per file)").
 MAX_UPLOAD_BYTES = 5 * 1024 * 1024  # 5 MB
 
-# Extensions the server will accept. In the wired-up server this comes from
-# ParserRegistry.supported_extensions; the stub hard-codes the same set so
-# the TUI gets the same early-rejection behaviour.
+# Extensions the server accepts when NO ingestion pipeline is wired (offline
+# demos / tests). When a pipeline is wired via set_ingestion_service(), the
+# allow-list is taken from the live ParserRegistry instead (see _handle_upload)
+# so it can never drift from what the parsers actually handle. This frozenset
+# is the stub fallback and mirrors the parsers' current extensions.
 SUPPORTED_EXTENSIONS: frozenset[str] = frozenset(
     {"txt", "md", "markdown", "mkd", "mkdn", "mdown"}
 )
@@ -112,6 +122,19 @@ SUPPORTED_EXTENSIONS: frozenset[str] = frozenset(
 # Single message the wire returns for any login failure. Never include the
 # specific reason here — see the auth design note in the module docstring.
 _INVALID_CREDENTIALS = "invalid credentials"
+
+DUMMY_RESPONSES = [
+    "Based on the documents you uploaded, the short answer is: yes, but with caveats. [dummy response from server]",
+    "I scanned the relevant chunks and the most likely answer is somewhere on page 3. [dummy response from server]",
+    "Good question. The documents suggest three possible interpretations -- want me to enumerate them? [dummy response from server]",
+    "I couldn't find a definitive answer, but the closest match talks about exactly this topic. [dummy response from server]",
+    "According to your uploaded files, the relevant section explicitly addresses this. [dummy response from server]",
+    "That's outside what your documents cover. Try uploading more material on the topic. [dummy response from server]",
+    "The documents mention this in passing -- I'd recommend re-checking the source for nuance. [dummy response from server]",
+    "Yes. The evidence in your corpus points clearly in that direction. [dummy response from server]",
+    "No, your documents actually argue the opposite, citing a specific case study. [dummy response from server]",
+    "I'd summarize the answer in three bullet points if you'd like a quick overview. [dummy response from server]",
+]
 
 logger = logging.getLogger("dummy_server")
 
@@ -133,20 +156,10 @@ class _UserStore(Protocol):
     def create(self, username: str, password_hash: str) -> UserAcc: ...
 
 
-class _QueryService(Protocol):
-    """Minimal query service surface the socket handler needs."""
-
-    def ask(self, user_id: object, question: str) -> QueryResult: ...
-
-
-class _IngestionService(Protocol):
-    """Minimal ingestion service surface the socket handler needs."""
-
-    def ingest(self, filename: str, raw: bytes, user_id: object) -> object: ...
-
-
 class _DocumentStore(Protocol):
     """Minimal document metadata store surface the socket handler needs."""
+
+    def upsert(self, document: object) -> None: ...
 
     def list_by_user(self, user_id: object) -> list[dict[str, Any]]: ...
 
@@ -185,8 +198,6 @@ class _MemoryUserStore:
 
 # Module-level hook — replace from main() / tests via set_user_store().
 _user_store: _UserStore = _MemoryUserStore()
-_query_service: _QueryService | None = None
-_ingestion_service: _IngestionService | None = None
 _document_store: _DocumentStore | None = None
 
 
@@ -196,22 +207,21 @@ def set_user_store(store: _UserStore) -> None:
     _user_store = store
 
 
-def set_query_service(service: _QueryService | None) -> None:
-    """Swap the active query service, or disable query handling with None."""
-    global _query_service
-    _query_service = service
-
-
-def set_ingestion_service(service: _IngestionService | None) -> None:
-    """Swap the active ingestion service, or keep uploads validation-only."""
-    global _ingestion_service
-    _ingestion_service = service
-
-
+# None means "no pipeline wired" → _handle_upload falls back to the validate-only
+# stub (so offline demos and the socket integration tests still get an ack).
 def set_document_store(store: _DocumentStore | None) -> None:
     """Swap the active document store, or disable document listing."""
     global _document_store
     _document_store = store
+
+
+_ingestion_service: IngestionServiceProtocol | None = None
+
+
+def set_ingestion_service(service: IngestionServiceProtocol | None) -> None:
+    """Swap the active ingestion pipeline (used by main() and by tests)."""
+    global _ingestion_service
+    _ingestion_service = service
 
 
 # Password hashing
@@ -493,33 +503,19 @@ class _DummyAIHandler(socketserver.StreamRequestHandler):
         return {"type": "logout_ok"}
 
     def _answer(self, user: UserAcc, text: str) -> dict[str, Any]:
-        if _query_service is None:
-            logger.warning(
-                "query from %s rejected: query service is not configured",
-                user.username,
-            )
-            return {"type": "error", "message": "query service is not configured"}
-
-        try:
-            result = _query_service.ask(user.id, text)
-        except QueryError as exc:
-            logger.warning("query from %s failed: %s", user.username, exc)
-            return {"type": "error", "message": str(exc)}
-        except Exception as exc:
-            logger.exception("query from %s failed unexpectedly", user.username)
-            return {"type": "error", "message": f"query failed: {exc}"}
-
+        # Pretend to think.
+        time.sleep(random.uniform(MIN_THINK_SECONDS, MAX_THINK_SECONDS))
+        body = random.choice(DUMMY_RESPONSES)
+        # Echo a hint of the question so it feels less robotic.
+        preview = text if len(text) <= 60 else text[:57] + "..."
+        answer = f'[dummy] {body}  (re: "{preview}")'
         logger.info(
             "query from %s: %r -> reply len=%d",
             user.username,
-            text[:60],
-            len(result.answer),
+            preview,
+            len(answer),
         )
-        return {
-            "type": "answer",
-            "text": result.answer,
-            "sources": self._serialize_sources(result),
-        }
+        return {"type": "answer", "text": answer}
 
     def _list_documents(self, user: UserAcc) -> dict[str, Any]:
         if _document_store is None:
@@ -540,32 +536,22 @@ class _DummyAIHandler(socketserver.StreamRequestHandler):
 
         return {"type": "documents", "documents": documents}
 
-    @staticmethod
-    def _serialize_sources(result: QueryResult) -> list[dict[str, Any]]:
-        return [
-            {
-                "doc_id": str(chunk.doc_id),
-                "position": chunk.position,
-                "similarity": chunk.similarity,
-                "metadata": chunk.metadata,
-            }
-            for chunk in result.sources
-        ]
-
     def _handle_upload(self, user: UserAcc, msg: dict[str, Any]) -> dict[str, Any]:
         """
-        Validate an upload message and return an ack.
+        Validate an upload message, run ingestion if wired, and return an ack.
 
         Steps:
           1. Shape validation (required string fields present, non-empty).
-          2. Extension allow-list check against SUPPORTED_EXTENSIONS.
+          2. Extension allow-list check (from the live ParserRegistry when a
+             pipeline is wired, else the SUPPORTED_EXTENSIONS stub set).
           3. Base64 decode (rejects malformed payload).
           4. Size cap check against MAX_UPLOAD_BYTES.
+          5. If an IngestionService is wired, hand (filename, raw, user.id) to
+             it for the parse → chunk → embed → store pipeline and return an
+             ack with the chunk count + doc id. Otherwise return a plain ack.
 
-        This is a stub — once IngestionService is wired in, the decoded
-        bytes will be passed to it for the parse → chunk → embed → store
-        pipeline. The authenticated user.id will be stamped onto the
-        resulting Document at that point — see the TODO below.
+        The authenticated user.id is stamped onto every resulting chunk inside
+        IngestionService — the wire never trusts a client-supplied user id.
         """
         filename = msg.get("filename")
         if not isinstance(filename, str) or not filename.strip():
@@ -578,15 +564,24 @@ class _DummyAIHandler(socketserver.StreamRequestHandler):
         # Strip any directory component the client may have included.
         filename = os.path.basename(filename)
 
+        # Source of truth for accepted extensions: the live registry when a
+        # pipeline is wired, else the hard-coded stub set. This keeps the
+        # early-rejection check from drifting away from what the parsers handle.
+        supported = (
+            frozenset(_ingestion_service.supported_extensions)
+            if _ingestion_service is not None
+            else SUPPORTED_EXTENSIONS
+        )
+
         # Extension allow-list. Catching unknown extensions here saves the
         # base64 decode for files we'd reject anyway.
         ext = os.path.splitext(filename)[1].lstrip(".").lower()
-        if ext not in SUPPORTED_EXTENSIONS:
+        if ext not in supported:
             return {
                 "type": "error",
                 "message": (
                     f"unsupported extension '.{ext}' for '{filename}' "
-                    f"(supported: {sorted(SUPPORTED_EXTENSIONS)})"
+                    f"(supported: {sorted(supported)})"
                 ),
             }
 
@@ -605,52 +600,65 @@ class _DummyAIHandler(socketserver.StreamRequestHandler):
                 ),
             }
 
-        if _ingestion_service is not None:
+        # No pipeline wired (offline demo / tests) → keep the validate-only stub.
+        if _ingestion_service is None:
+            logger.info(
+                "upload from %s: '%s' accepted (%d bytes, ext=.%s) "
+                "[stub: no ingestion service wired]",
+                user.username,
+                filename,
+                len(raw),
+                ext,
+            )
+            return {"type": "upload_ack", "filename": filename, "size": len(raw)}
+
+        # Real pipeline: parse → chunk → embed → store. The authenticated
+        # user.id is stamped onto every chunk inside IngestionService.
+        try:
+            event = _ingestion_service.ingest(filename, raw, user.id)
+        except RAGException as exc:
+            logger.warning(
+                "upload from %s: ingestion failed for '%s': %s",
+                user.username,
+                filename,
+                exc,
+            )
+            return {"type": "error", "message": f"ingestion failed: {exc}"}
+
+        if event.status is IngestionStatus.FAILED:
+            error_msg = event.error_message or "unknown ingestion error"
+            logger.warning(
+                "upload from %s: '%s' FAILED: %s", user.username, filename, error_msg
+            )
+            return {"type": "error", "message": f"ingestion failed: {error_msg}"}
+
+        logger.info(
+            "upload from %s: '%s' ingested (%d bytes -> %d chunks, doc_id=%s)",
+            user.username,
+            filename,
+            len(raw),
+            len(event.chunks),
+            event.document.id,
+        )
+
+        if _document_store is not None:
             try:
-                event = _ingestion_service.ingest(filename, raw, user.id)
-            except RAGException as exc:
+                _document_store.upsert(event.document)
+            except StorageError as exc:
                 logger.warning(
-                    "upload from %s failed ingestion for '%s': %s",
+                    "upload from %s: failed to persist document metadata for '%s': %s",
                     user.username,
                     filename,
                     exc,
                 )
-                return {"type": "error", "message": f"ingestion failed: {exc}"}
-            except Exception as exc:
-                logger.exception(
-                    "upload from %s failed unexpectedly for '%s'",
-                    user.username,
-                    filename,
-                )
-                return {"type": "error", "message": f"ingestion failed: {exc}"}
-
-            logger.info(
-                "upload from %s: '%s' ingested (%d bytes)",
-                user.username,
-                filename,
-                len(raw),
-            )
-            return {
-                "type": "upload_ack",
-                "filename": filename,
-                "size": len(raw),
-                "document_id": str(event.document.id),
-                "chunks": len(event.chunks),
-            }
-
-        logger.info(
-            "upload from %s: '%s' accepted (%d bytes, ext=.%s) "
-            "[validation-only: ingestion service disabled]",
-            user.username,
-            filename,
-            len(raw),
-            ext,
-        )
+                return {"type": "error", "message": f"document metadata failed: {exc}"}
 
         return {
             "type": "upload_ack",
             "filename": filename,
             "size": len(raw),
+            "chunks": len(event.chunks),
+            "doc_id": str(event.document.id),
         }
 
     def _send(self, obj: dict[str, Any]) -> None:
@@ -739,45 +747,29 @@ def main() -> None:
         logger.info("user store: in-memory (set MONGODB_URI to use Mongo)")
         set_document_store(None)
 
-    try:
-        from services.ingestion.wiring import build_ingestion_service_from_env
+    # Wire the real ingestion pipeline when MongoDB is configured. The
+    # embedding model is loaded in-process by PlatformEmbeddingClient (mlx on
+    # macOS, llama_cpp on Linux), so no embedding server URL is needed; an
+    # optional BGE_MODEL_PATH overrides the Linux .gguf location. Without
+    # MONGODB_URI, uploads still validate and ack (stub) so demos work.
+    if mongo_uri:
+        try:
+            from services.ingestion.composition import build_ingestion_service
 
-        ingestion_service = build_ingestion_service_from_env()
-        if ingestion_service is None:
-            set_ingestion_service(None)
-            logger.info(
-                "ingestion service: disabled "
-                "(set RAG_MONGODB_URI or MONGODB_URI to enable)"
+            set_ingestion_service(
+                build_ingestion_service(
+                    mongo_uri,
+                    bge_model_path=os.environ.get("BGE_MODEL_PATH"),
+                )
             )
-        else:
-            set_ingestion_service(ingestion_service)
-            logger.info(
-                "ingestion service: IngestionService wired with parsers, "
-                "chunking, native embeddings and MongoVectorStore"
+            logger.info("ingestion pipeline: ON (mongo=%s)", mongo_uri)
+        except (RAGException, OSError) as exc:
+            logger.warning(
+                "could not build ingestion pipeline — uploads will validate-only: %s",
+                exc,
             )
-    except RAGException as exc:
-        set_ingestion_service(None)
-        logger.warning("ingestion service disabled: %s", exc)
-
-    try:
-        from services.query.wiring import build_query_service_from_env
-
-        query_service = build_query_service_from_env()
-        if query_service is None:
-            set_query_service(None)
-            logger.info(
-                "query service: disabled "
-                "(set RAG_MONGODB_URI or MONGODB_URI to enable)"
-            )
-        else:
-            set_query_service(query_service)
-            logger.info(
-                "query service: QueryService wired with MongoVectorStore "
-                "+ native model clients"
-            )
-    except RAGException as exc:
-        set_query_service(None)
-        logger.warning("query service disabled: %s", exc)
+    else:
+        logger.info("ingestion pipeline: OFF (set MONGODB_URI to enable)")
 
     serve_forever(args.host, args.port)
 

@@ -16,7 +16,6 @@ AIClient, and checks the full round-trip:
 from __future__ import annotations
 
 import socket
-import uuid
 from collections.abc import Generator
 
 import pytest
@@ -24,13 +23,9 @@ import pytest
 from client.ai_client import AIClient, AIClientError
 from services.dummy_server import (
     _MemoryUserStore,
-    set_document_store,
-    set_ingestion_service,
-    set_query_service,
     set_user_store,
     start_in_background,
 )
-from services.shared.domain import Chunk, QueryResult
 
 
 def _free_port() -> int:
@@ -39,29 +34,10 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-class _FakeQueryService:
-    def ask(self, user_id: object, question: str) -> QueryResult:
-        return QueryResult(
-            answer=f"[test-rag] {question}",
-            sources=[
-                Chunk(
-                    text="TCP is a reliable transport protocol.",
-                    doc_id=uuid.UUID(int=1),
-                    user_id=uuid.UUID(int=2),
-                    position=3,
-                    similarity=0.875,
-                    metadata={"filename": "networking.md", "page": 2},
-                )
-            ],
-        )
-
-
 @pytest.fixture
 def server() -> Generator[tuple[str, int], None, None]:
     # Fresh in-memory user store per test so tests don't see each other.
     set_user_store(_MemoryUserStore())
-    set_document_store(None)
-    set_query_service(_FakeQueryService())
 
     port = _free_port()
     srv, _thread = start_in_background(host="127.0.0.1", port=port)
@@ -70,9 +46,6 @@ def server() -> Generator[tuple[str, int], None, None]:
     finally:
         srv.shutdown()
         srv.server_close()
-        set_document_store(None)
-        set_query_service(None)
-        set_ingestion_service(None)
 
 
 # Happy paths
@@ -87,23 +60,6 @@ def test_signup_binds_session(server: tuple[str, int]) -> None:
         # No username on the wire — server stamps from the session.
         answer = client.ask("any thoughts?")
         assert isinstance(answer, str) and answer
-
-
-def test_ask_with_sources_round_trips_query_sources(
-    server: tuple[str, int],
-) -> None:
-    host, port = server
-    with AIClient(host=host, port=port, timeout=5.0) as client:
-        client.signup("alice", "hunter2")
-
-        result = client.ask_with_sources("what is tcp?")
-
-        assert result.answer == "[test-rag] what is tcp?"
-        assert len(result.sources) == 1
-        assert result.sources[0].doc_id == str(uuid.UUID(int=1))
-        assert result.sources[0].position == 3
-        assert result.sources[0].similarity == 0.875
-        assert result.sources[0].metadata == {"filename": "networking.md", "page": 2}
 
 
 def test_login_binds_session(server: tuple[str, int]) -> None:

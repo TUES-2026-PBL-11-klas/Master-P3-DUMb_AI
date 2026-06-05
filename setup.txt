@@ -1,0 +1,17 @@
+Compile Llama.cpp for your hardware
+
+pip install scikit-build-core cmake
+ then:
+export LLAMA_CPP_PATH=/home/alex/llama.cpp (or other path to llama.cpp)
+
+pip install --no-build-isolation \
+  -C cmake.args="-DLLAMA_HIPBLAS=1" \
+  -C cmake.args="-DLLAMA_AVX=OFF" \
+  -C cmake.args="-DLLAMA_AVX2=OFF" \
+  -C cmake.args="-DLLAMA_AVX512=OFF" \
+  -C cmake.args="-DLLAMA_F16C=OFF" \
+  -C cmake.args="-DLLAMA_FMA=OFF" \
+  llama-cpp-python
+
+pip install llama-index llama-index-embeddings-huggingface
+pip install llama-index-llms-llama-cpp
