@@ -169,3 +169,18 @@ class DocumentStore(Protocol):
         *,
         ready_only: bool = True,
     ) -> list[dict[str, Any]]: ...
+
+    def delete(
+        self,
+        user_id: "uuid.UUID | str",
+        doc_id: "uuid.UUID | str",
+    ) -> bool:
+        """
+        Remove the document metadata row owned by *user_id* with id *doc_id*.
+
+        Scoped to the owner so one user can never delete another's document.
+        Returns True if a row was removed, False if nothing matched (unknown
+        id, or it belongs to a different user). Chunk removal is a separate
+        step the caller performs against the vector store.
+        """
+        ...

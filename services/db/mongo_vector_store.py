@@ -304,9 +304,20 @@ class MongoVectorStore(Generic[T_inv]):
 
         return [self._doc_to_chunk(doc) for doc in raw_docs]
 
-    def delete_document(self, doc_id: UUID | str) -> int:
+    def delete_document(
+        self,
+        doc_id: UUID | str,
+        *,
+        user_id: UUID | str | None = None,
+    ) -> int:
         """
         Delete every chunk belonging to *doc_id*. Returns the number removed.
+
+        If *user_id* is given the delete is scoped to that owner, so a caller
+        can never remove another user's chunks even if they guess a doc_id.
+        Omitting *user_id* is allowed for internal compensating actions (e.g.
+        rolling back a partially-stored ingestion) where ownership has already
+        been verified by the caller.
 
         Used as a compensating action: if storing a document's chunks fails
         part-way through (an unordered bulk write can persist some chunks
@@ -317,8 +328,11 @@ class MongoVectorStore(Generic[T_inv]):
         Raises:
             StorageError: if the delete itself fails.
         """
+        filter_: dict[str, str] = {"doc_id": str(doc_id)}
+        if user_id is not None:
+            filter_["user_id"] = str(user_id)
         try:
-            result = self._col.delete_many({"doc_id": str(doc_id)})
+            result = self._col.delete_many(filter_)
         except Exception as exc:
             raise StorageError(f"delete_document({doc_id}) failed: {exc}") from exc
         deleted = getattr(result, "deleted_count", 0) or 0
