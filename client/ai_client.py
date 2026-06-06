@@ -11,7 +11,7 @@ Wire protocol (see services.dummy_server for the server side):
         {"type": "login",  "username": <str>, "password": <str>}
         {"type": "signup", "username": <str>, "password": <str>}
         {"type": "logout"}
-        {"type": "documents"}                         # session-authenticated
+        {"type": "documents"}                        # session-authenticated
         {"type": "query",  "text": <str>}            # session-authenticated
         {"type": "upload", "filename": <str>,        # session-authenticated
 
@@ -35,7 +35,7 @@ Session model:
       1. If the underlying socket reconnects (e.g. after a transport
          error), the session on the *new* socket is empty. AIClient
          re-runs the last successful login automatically so callers
-         don't need to think about it. See _ensure_session().
+         don't need to think about it. See _authed_round_trip().
       2. Closing the client and opening a new one is a clean logout —
          no token to revoke server-side.
 """
@@ -248,7 +248,9 @@ class AIClient:
             if metadata is None:
                 metadata = {}
             if not isinstance(metadata, dict):
-                raise AIClientError(f"source metadata must be an object: {raw_source!r}")
+                raise AIClientError(
+                    f"source metadata must be an object: {raw_source!r}"
+                )
 
             sources.append(
                 AnswerSource(
@@ -383,9 +385,7 @@ class AIClient:
             documents = reply.get("documents", [])
             if not isinstance(documents, list):
                 raise AIClientError(f"non-list documents field: {documents!r}")
-            return [
-                doc for doc in documents if isinstance(doc, dict)
-            ]
+            return [doc for doc in documents if isinstance(doc, dict)]
         if kind == "error":
             raise AIClientError(f"server error: {reply.get('message', 'unknown')}")
         raise AIClientError(f"unexpected reply type: {kind!r}")

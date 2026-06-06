@@ -50,7 +50,7 @@ def test_list_by_user_returns_document_summaries() -> None:
 
     result = store.list_by_user("user-1")
 
-    collection.find.assert_called_once_with({"user_id": "user-1"})
+    collection.find.assert_called_once_with({"user_id": "user-1", "status": "ready"})
     cursor.sort.assert_called_once_with("uploaded_at", -1)
     assert result == [
         {
@@ -61,3 +61,29 @@ def test_list_by_user_returns_document_summaries() -> None:
             "error_message": None,
         }
     ]
+
+
+def test_list_by_user_ready_only_false_omits_status_filter() -> None:
+    collection = MagicMock()
+    cursor = MagicMock()
+    cursor.sort.return_value = []
+    collection.find.return_value = cursor
+    store = MongoDocumentStore(collection)
+
+    store.list_by_user("user-1", ready_only=False)
+
+    collection.find.assert_called_once_with({"user_id": "user-1"})
+
+
+def test_delete_document_removes_chunks() -> None:
+    # Guard the vector-store compensation path used on storage failure.
+    from services.db.mongo_vector_store import MongoVectorStore
+
+    collection = MagicMock()
+    collection.delete_many.return_value = MagicMock(deleted_count=3)
+    store: MongoVectorStore = MongoVectorStore(collection)
+
+    removed = store.delete_document("doc-1")
+
+    collection.delete_many.assert_called_once_with({"doc_id": "doc-1"})
+    assert removed == 3

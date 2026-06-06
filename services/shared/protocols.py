@@ -1,9 +1,9 @@
 from __future__ import annotations
 import uuid
-from typing import TYPE_CHECKING, ClassVar, Protocol, TypeVar, runtime_checkable
+from typing import TYPE_CHECKING, Any, ClassVar, Protocol, TypeVar, runtime_checkable
 
 if TYPE_CHECKING:
-    from services.shared.domain import IngestionEvent
+    from services.shared.domain import Document, IngestionEvent, UserAcc
 
 
 # Generic type variable used across the parser and store protocols.
@@ -128,3 +128,44 @@ class IngestionServiceProtocol(Protocol):
     def ingest(
         self, filename: str, raw: bytes, user_id: uuid.UUID
     ) -> "IngestionEvent": ...
+
+
+# UserStore / DocumentStore
+#
+# Repository surfaces consumed by the socket layer (dummy_server) and, for
+# DocumentStore, by the ingestion service. They live here — next to the other
+# pipeline protocols — rather than as private classes inside dummy_server so
+# that every component depends on the same structural contract: MongoUserStore /
+# MongoDocumentStore in production, the in-memory fallbacks for demos, and
+# MagicMocks in tests all satisfy these without importing one another.
+@runtime_checkable
+class UserStore(Protocol):
+    """Minimal repository surface the auth handler needs."""
+
+    def find_by_username(self, username: str) -> "UserAcc | None": ...
+
+    def create(self, username: str, password_hash: str) -> "UserAcc": ...
+
+
+@runtime_checkable
+class DocumentStore(Protocol):
+    """
+    Minimal document-metadata store surface.
+
+    Used by the socket handler (to list a user's documents) and by the
+    ingestion service (to persist document metadata across the pipeline
+    lifecycle: a PARSED row written before chunks, flipped to READY only
+    after storage succeeds, or to FAILED on error).
+
+    ``list_by_user`` returns only READY documents by default — callers that
+    need the full set (diagnostics, admin) pass ``ready_only=False``.
+    """
+
+    def upsert(self, document: "Document") -> None: ...
+
+    def list_by_user(
+        self,
+        user_id: "uuid.UUID | str",
+        *,
+        ready_only: bool = True,
+    ) -> list[dict[str, Any]]: ...

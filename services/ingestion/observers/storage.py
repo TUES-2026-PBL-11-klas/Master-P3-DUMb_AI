@@ -96,7 +96,7 @@ class StorageObserver:
         if missing:
             message = (
                 f"StorageObserver: {len(missing)} of {len(chunks)} chunk(s) "
-                f"have no embedding (positions={missing[:5]!r}{'...' if len(missing) > 5 else ''}) — "
+                f"have no embedding (positions={missing[:5]}...) — "
                 f"EmbeddingObserver must run before StorageObserver"
             )
             logger.error(message)
@@ -117,6 +117,7 @@ class StorageObserver:
                 event.document.filename,
                 exc,
             )
+            self._cleanup_partial_write(event)
             event.fail(str(exc))
             raise
         except Exception as exc:
@@ -128,6 +129,7 @@ class StorageObserver:
                 f"{len(chunks)} chunk(s) for '{event.document.filename}': {exc}"
             )
             logger.error(str(wrapped))
+            self._cleanup_partial_write(event)
             event.fail(str(wrapped))
             raise wrapped from exc
 
@@ -139,6 +141,28 @@ class StorageObserver:
             len(chunks),
             event.document.filename,
         )
+
+    def _cleanup_partial_write(self, event: "IngestionEvent") -> None:
+        """
+        Best-effort removal of any chunks an aborted store() left behind.
+
+        An unordered bulk upsert can persist some chunks before failing, which
+        would leave a partial set in the index for a document that never
+        reached READY. If the backing store can delete by document, drop those
+        chunks. Never raises — cleanup failure must not mask the original
+        StorageError, it is only logged.
+        """
+        delete = getattr(self._store, "delete_document", None)
+        if not callable(delete):
+            return
+        try:
+            delete(event.document.id)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "StorageObserver: cleanup of partial write for '%s' failed: %s",
+                event.document.filename,
+                exc,
+            )
 
     def __repr__(self) -> str:
         return f"StorageObserver(store={self._store!r})"

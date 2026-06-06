@@ -68,7 +68,7 @@ from services.shared.exceptions import RAGException
 if TYPE_CHECKING:
     from services.ingestion.parsers.registry import ParserRegistry
     from services.shared.domain import Document
-    from services.shared.protocols import IngestionObserver
+    from services.shared.protocols import DocumentStore, IngestionObserver
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +102,7 @@ class IngestionService:
         registry: "ParserRegistry[Document]",
         observers: "list[IngestionObserver] | None" = None,
         *,
+        document_store: "DocumentStore | None" = None,
         max_workers: int = 4,
         max_upload_bytes: int = DEFAULT_MAX_UPLOAD_BYTES,
     ) -> None:
@@ -116,6 +117,15 @@ class IngestionService:
                               subscribe(). The canonical order is chunk → embed →
                               store, but the service does not enforce that — it
                               simply runs them in the order given.
+            document_store:   Optional DocumentStore for document-metadata
+                              persistence. When provided, the service writes a
+                              PARSED metadata row *before* any chunks are stored,
+                              flips it to READY only after the observer chain
+                              succeeds, and marks it FAILED on error. This
+                              ordering is what guarantees a chunk's doc_id always
+                              has a corresponding document row — no orphaned
+                              chunks. When None (most unit tests), metadata
+                              persistence is simply skipped.
             max_workers:      Size of the thread pool used by ingest_batch().
                               Defaults to 4, matching the typical small-deployment
                               profile from the project reference.
@@ -125,6 +135,7 @@ class IngestionService:
         """
         self._registry = registry
         self._observers: list[IngestionObserver] = list(observers or [])
+        self._document_store: "DocumentStore | None" = document_store
         self._executor = ThreadPoolExecutor(
             max_workers=max_workers, thread_name_prefix="ingest"
         )
@@ -264,7 +275,23 @@ class IngestionService:
         event = IngestionEvent(document=document)
         event.status = IngestionStatus.PARSED
 
-        self._notify(event)
+        # Step 5a: persist the document metadata BEFORE any chunks are written.
+        # The row is PARSED (not READY), so list_by_user won't surface it yet.
+        # Writing it first is what prevents orphaned chunks: every chunk a
+        # downstream observer stores already has a document row to belong to.
+        self._persist_metadata(document)
+
+        try:
+            self._notify(event)
+        except RAGException:
+            # Chain failed (an observer already called event.fail()). Mark the
+            # persisted row FAILED so it stays out of READY listings, then let
+            # the original exception propagate unchanged. StorageObserver has
+            # already cleaned up any partial chunk write of its own.
+            if document.status is not DocumentStatus.FAILED:
+                document.mark_failed(event.error_message or "ingestion failed")
+            self._persist_metadata(document)
+            raise
 
         # Step 6: if the chain finished without complaint, the document is READY.
         # Observers may have advanced event.status to STORED; mark COMPLETED here
@@ -273,6 +300,9 @@ class IngestionService:
         if event.status is not IngestionStatus.FAILED:
             event.status = IngestionStatus.COMPLETED
             document.mark_status(DocumentStatus.READY)
+            # Flip the persisted row to READY — only now does it become
+            # visible to list_by_user().
+            self._persist_metadata(document)
             logger.info(
                 "IngestionService: ingestion complete for '%s' (doc_id=%s, %d chunks)",
                 filename,
@@ -281,6 +311,30 @@ class IngestionService:
             )
 
         return event
+
+    def _persist_metadata(self, document: "Document") -> None:
+        """
+        Upsert *document*'s metadata if a document store is wired.
+
+        No-op when no store is configured (the common unit-test case).
+        A metadata-write failure is surfaced as a RAGException so the caller
+        sees a failed ingest rather than a silently lost document; because the
+        very first metadata write happens before any chunks, a failure there
+        means nothing was stored, and a failure on the READY flip leaves the
+        row at PARSED (recoverable) rather than orphaning chunks.
+        """
+        if self._document_store is None:
+            return
+        try:
+            self._document_store.upsert(document)
+        except RAGException as exc:
+            logger.error(
+                "IngestionService: failed to persist metadata for '%s' (%s): %s",
+                document.filename,
+                document.id,
+                exc,
+            )
+            raise
 
     # Batch ingestion
 

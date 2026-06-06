@@ -89,15 +89,28 @@ class MongoDocumentStore:
             document.id,
         )
 
-    def list_by_user(self, user_id: UUID | str) -> list[dict[str, Any]]:
+    def list_by_user(
+        self,
+        user_id: UUID | str,
+        *,
+        ready_only: bool = True,
+    ) -> list[dict[str, Any]]:
         """
         Return document metadata for a user, newest first.
+
+        By default only documents that have completed the pipeline
+        (status == READY) are returned, so the TUI never shows a file that
+        is mid-ingestion or that failed. Pass ``ready_only=False`` to get
+        every status (useful for diagnostics).
 
         The TUI only needs display fields, so this returns plain dicts instead
         of reconstructing Document objects with empty content.
         """
+        query: dict[str, Any] = {"user_id": str(user_id)}
+        if ready_only:
+            query["status"] = DocumentStatus.READY.value
         try:
-            cursor = self._col.find({"user_id": str(user_id)}).sort("uploaded_at", -1)
+            cursor = self._col.find(query).sort("uploaded_at", -1)
             docs = list(cursor)
         except Exception as exc:
             raise StorageError(f"list_by_user({user_id}) failed: {exc}") from exc
@@ -124,7 +137,7 @@ class MongoDocumentStore:
             "document_id": str(doc.get("id", doc.get("_id", ""))),
             "filename": str(doc.get("filename", "")),
             "uploaded_at": uploaded_at.isoformat()
-            if hasattr(uploaded_at, "isoformat")
+            if uploaded_at is not None and hasattr(uploaded_at, "isoformat")
             else str(uploaded_at or ""),
             "status": str(status),
             "error_message": doc.get("error_message"),

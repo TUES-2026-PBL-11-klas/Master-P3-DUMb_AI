@@ -25,7 +25,8 @@ Server -> Client:
     {"type": "auth_ok",    "username": "<str>"}     # reply to login / signup
     {"type": "logout_ok"}
     {"type": "documents",   "documents": <list>}
-    {"type": "answer",     "text": "<str>"}         # reply to query
+    {"type": "answer",     "text": "<str>",        # reply to query
+                           "sources": <list>}       # citations (may be empty)
     {"type": "upload_ack", "filename": "<str>", "size": <int>,
                            "chunks": <int>,         # optional — present only
                            "doc_id": "<str>"}       # when a pipeline is wired
@@ -91,11 +92,15 @@ import socket
 import socketserver
 import threading
 import time
-from typing import Any, Protocol
+from typing import Any
 
-from services.shared.domain import IngestionStatus, UserAcc
+from services.shared.domain import Document, DocumentStatus, IngestionStatus, UserAcc
 from services.shared.exceptions import AuthError, RAGException, StorageError
-from services.shared.protocols import IngestionServiceProtocol
+from services.shared.protocols import (
+    DocumentStore,
+    IngestionServiceProtocol,
+    UserStore,
+)
 
 
 # Configuration
@@ -139,29 +144,16 @@ DUMMY_RESPONSES = [
 logger = logging.getLogger("dummy_server")
 
 
-# User store plumbing
+# User / document store plumbing
 #
-# The handler talks to "something that looks like a user store" via a tiny
-# structural Protocol. Production code injects a MongoUserStore; tests can
-# inject a MagicMock; if nothing is injected (the default), we fall back to
-# the in-memory _MemoryUserStore so the server still boots and is demoable
-# without Mongo — matching the offline-stub philosophy in client/tui.py.
-
-
-class _UserStore(Protocol):
-    """Minimal repository surface the auth handler needs."""
-
-    def find_by_username(self, username: str) -> UserAcc | None: ...
-
-    def create(self, username: str, password_hash: str) -> UserAcc: ...
-
-
-class _DocumentStore(Protocol):
-    """Minimal document metadata store surface the socket handler needs."""
-
-    def upsert(self, document: object) -> None: ...
-
-    def list_by_user(self, user_id: object) -> list[dict[str, Any]]: ...
+# The handler talks to "something that looks like a store" via the structural
+# Protocols defined in services.shared.protocols (UserStore, DocumentStore).
+# Keeping the contracts there — rather than as private classes here — means the
+# Mongo stores, these in-memory fallbacks, and test mocks all satisfy one shared
+# definition. Production injects MongoUserStore / MongoDocumentStore; tests can
+# inject a MagicMock; if nothing is injected we fall back to the in-memory
+# stores below so the server still boots and is demoable without Mongo —
+# matching the offline-stub philosophy in client/tui.py.
 
 
 class _MemoryUserStore:
@@ -196,20 +188,69 @@ class _MemoryUserStore:
             return user
 
 
-# Module-level hook — replace from main() / tests via set_user_store().
-_user_store: _UserStore = _MemoryUserStore()
-_document_store: _DocumentStore | None = None
+class _MemoryDocumentStore:
+    """
+    In-memory DocumentStore fallback used when no Mongo store is injected.
+
+    Lets the document-listing and citation demo work without Mongo: a stub
+    upload registers a READY document here and a later ``documents`` request
+    (and the dummy citation builder) reads it back. Keyed by document id so
+    re-upserting the same document (e.g. the PARSED→READY flip in the real
+    pipeline) overwrites in place.
+    """
+
+    def __init__(self) -> None:
+        self._by_id: dict[str, Document] = {}
+        self._lock = threading.Lock()
+
+    def upsert(self, document: Document) -> None:
+        with self._lock:
+            self._by_id[str(document.id)] = document
+
+    def list_by_user(
+        self,
+        user_id: object,
+        *,
+        ready_only: bool = True,
+    ) -> list[dict[str, Any]]:
+        with self._lock:
+            docs = [
+                d
+                for d in self._by_id.values()
+                if str(d.user_id) == str(user_id)
+                and (not ready_only or d.status is DocumentStatus.READY)
+            ]
+        docs.sort(key=lambda d: d.uploaded_at, reverse=True)
+        return [
+            {
+                "document_id": str(d.id),
+                "filename": d.filename,
+                "uploaded_at": d.uploaded_at.isoformat()
+                if hasattr(d.uploaded_at, "isoformat")
+                else str(d.uploaded_at),
+                "status": d.status.value,
+                "error_message": d.error_message,
+            }
+            for d in docs
+        ]
 
 
-def set_user_store(store: _UserStore) -> None:
+# Module-level hooks — replace from main() / tests via the setters below.
+# The document store defaults to an in-memory one (not None) so that an
+# unconfigured server is still demoable end-to-end (upload → list → cite).
+_user_store: UserStore = _MemoryUserStore()
+_document_store: DocumentStore | None = _MemoryDocumentStore()
+
+
+def set_user_store(store: UserStore) -> None:
     """Swap the active user store (used by main() and by tests)."""
     global _user_store
     _user_store = store
 
 
-# None means "no pipeline wired" → _handle_upload falls back to the validate-only
-# stub (so offline demos and the socket integration tests still get an ack).
-def set_document_store(store: _DocumentStore | None) -> None:
+# None disables document listing entirely (and the stub upload won't register
+# anything). Tests use None to assert the "store not configured" path.
+def set_document_store(store: DocumentStore | None) -> None:
     """Swap the active document store, or disable document listing."""
     global _document_store
     _document_store = store
@@ -509,13 +550,50 @@ class _DummyAIHandler(socketserver.StreamRequestHandler):
         # Echo a hint of the question so it feels less robotic.
         preview = text if len(text) <= 60 else text[:57] + "..."
         answer = f'[dummy] {body}  (re: "{preview}")'
+        sources = self._dummy_sources_for(user)
         logger.info(
-            "query from %s: %r -> reply len=%d",
+            "query from %s: %r -> reply len=%d, %d source(s)",
             user.username,
             preview,
             len(answer),
+            len(sources),
         )
-        return {"type": "answer", "text": answer}
+        return {"type": "answer", "text": answer, "sources": sources}
+
+    def _dummy_sources_for(self, user: UserAcc) -> list[dict[str, Any]]:
+        """
+        Build placeholder citations from the user's READY documents.
+
+        The dummy server does no real retrieval, but pointing the citations
+        at the files the user actually uploaded makes the end-to-end demo
+        coherent (upload notes → ask → see them cited). Returns an empty list
+        when no document store is wired or the user has no READY documents —
+        the client treats missing/empty sources as "no citations".
+        """
+        if _document_store is None:
+            return []
+        try:
+            documents = _document_store.list_by_user(user.id)
+        except Exception:
+            # Citations are best-effort decoration on a dummy answer — never
+            # let a store hiccup turn a successful query into an error.
+            logger.warning("could not load documents for citations", exc_info=True)
+            return []
+
+        sources: list[dict[str, Any]] = []
+        for position, doc in enumerate(documents[:3]):
+            sources.append(
+                {
+                    "doc_id": str(doc.get("document_id") or doc.get("id") or ""),
+                    "position": position,
+                    "similarity": round(random.uniform(0.60, 0.95), 3),
+                    "metadata": {
+                        "filename": doc.get("filename", ""),
+                        "page": position + 1,
+                    },
+                }
+            )
+        return sources
 
     def _list_documents(self, user: UserAcc) -> dict[str, Any]:
         if _document_store is None:
@@ -600,8 +678,12 @@ class _DummyAIHandler(socketserver.StreamRequestHandler):
                 ),
             }
 
-        # No pipeline wired (offline demo / tests) → keep the validate-only stub.
+        # No pipeline wired (offline demo / tests) → validate-only stub.
+        # There is no real chunk/embed/store step here, so the document never
+        # produces orphanable chunks; we register it as READY purely so the
+        # document-listing + citation demo works end-to-end without Mongo.
         if _ingestion_service is None:
+            doc_id = self._register_stub_document(user, filename, len(raw))
             logger.info(
                 "upload from %s: '%s' accepted (%d bytes, ext=.%s) "
                 "[stub: no ingestion service wired]",
@@ -610,10 +692,21 @@ class _DummyAIHandler(socketserver.StreamRequestHandler):
                 len(raw),
                 ext,
             )
-            return {"type": "upload_ack", "filename": filename, "size": len(raw)}
+            ack: dict[str, Any] = {
+                "type": "upload_ack",
+                "filename": filename,
+                "size": len(raw),
+            }
+            if doc_id is not None:
+                ack["doc_id"] = doc_id
+            return ack
 
         # Real pipeline: parse → chunk → embed → store. The authenticated
-        # user.id is stamped onto every chunk inside IngestionService.
+        # user.id is stamped onto every chunk inside IngestionService, which
+        # also owns document-metadata persistence: it writes a PARSED row
+        # before any chunks, flips it to READY only after storage succeeds, and
+        # marks it FAILED on error. That ordering is what keeps the chunk index
+        # free of orphans, so the handler no longer writes metadata itself.
         try:
             event = _ingestion_service.ingest(filename, raw, user.id)
         except RAGException as exc:
@@ -641,18 +734,6 @@ class _DummyAIHandler(socketserver.StreamRequestHandler):
             event.document.id,
         )
 
-        if _document_store is not None:
-            try:
-                _document_store.upsert(event.document)
-            except StorageError as exc:
-                logger.warning(
-                    "upload from %s: failed to persist document metadata for '%s': %s",
-                    user.username,
-                    filename,
-                    exc,
-                )
-                return {"type": "error", "message": f"document metadata failed: {exc}"}
-
         return {
             "type": "upload_ack",
             "filename": filename,
@@ -660,6 +741,41 @@ class _DummyAIHandler(socketserver.StreamRequestHandler):
             "chunks": len(event.chunks),
             "doc_id": str(event.document.id),
         }
+
+    @staticmethod
+    def _register_stub_document(user: UserAcc, filename: str, size: int) -> str | None:
+        """
+        Record a validated stub upload as a READY document, if a store is wired.
+
+        Returns the new document id, or None when no document store is
+        configured (in which case the upload still acks, it just won't appear
+        in a later listing). Storage failures are swallowed — the stub upload
+        already succeeded at the wire level and must still ack.
+        """
+        if _document_store is None:
+            return None
+        from datetime import datetime, timezone
+        from uuid import uuid4
+
+        document = Document(
+            id=uuid4(),
+            user_id=user.id,
+            content="",
+            filename=filename,
+            uploaded_at=datetime.now(timezone.utc),
+            status=DocumentStatus.READY,
+        )
+        try:
+            _document_store.upsert(document)
+        except Exception:
+            logger.warning(
+                "stub upload: failed to register document '%s' for %s",
+                filename,
+                user.username,
+                exc_info=True,
+            )
+            return None
+        return str(document.id)
 
     def _send(self, obj: dict[str, Any]) -> None:
         data = (json.dumps(obj) + "\n").encode("utf-8")
@@ -724,41 +840,49 @@ def main() -> None:
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
     )
 
-    # If MONGODB_URI is set, wire a real MongoUserStore. Otherwise keep
-    # the in-memory fallback so the server still boots for demos.
+    # If MONGODB_URI is set, wire the real Mongo stores. Build ONE
+    # MongoDocumentStore and share it between document listing (here) and the
+    # ingestion pipeline (below) so the pipeline's metadata writes and the
+    # listing's reads hit the same collection. Otherwise keep the in-memory
+    # fallbacks so the server still boots — and demos end-to-end — for demos.
     mongo_uri = os.environ.get("MONGODB_URI")
+    mongo_document_store: DocumentStore | None = None
     if mongo_uri:
         try:
             from services.db.mongo_document_store import MongoDocumentStore
             from services.db.mongo_user_store import MongoUserStore
 
             set_user_store(MongoUserStore.from_uri(mongo_uri))
-            set_document_store(MongoDocumentStore.from_uri(mongo_uri))
+            mongo_document_store = MongoDocumentStore.from_uri(mongo_uri)
+            set_document_store(mongo_document_store)
             logger.info("user store: MongoUserStore (%s)", mongo_uri)
             logger.info("document store: MongoDocumentStore (%s)", mongo_uri)
         except StorageError as exc:
             logger.warning(
-                "could not connect to %s — falling back to in-memory user store: %s",
+                "could not connect to %s — falling back to in-memory stores: %s",
                 mongo_uri,
                 exc,
             )
-            set_document_store(None)
+            mongo_document_store = None
+            set_document_store(_MemoryDocumentStore())
     else:
         logger.info("user store: in-memory (set MONGODB_URI to use Mongo)")
-        set_document_store(None)
+        set_document_store(_MemoryDocumentStore())
 
     # Wire the real ingestion pipeline when MongoDB is configured. The
     # embedding model is loaded in-process by PlatformEmbeddingClient (mlx on
     # macOS, llama_cpp on Linux), so no embedding server URL is needed; an
     # optional BGE_MODEL_PATH overrides the Linux .gguf location. Without
-    # MONGODB_URI, uploads still validate and ack (stub) so demos work.
-    if mongo_uri:
+    # MONGODB_URI, uploads still validate and ack (stub) so demos work — and
+    # the stub registers a READY document so listing + citations still demo.
+    if mongo_uri and mongo_document_store is not None:
         try:
             from services.ingestion.composition import build_ingestion_service
 
             set_ingestion_service(
                 build_ingestion_service(
                     mongo_uri,
+                    document_store=mongo_document_store,
                     bge_model_path=os.environ.get("BGE_MODEL_PATH"),
                 )
             )
