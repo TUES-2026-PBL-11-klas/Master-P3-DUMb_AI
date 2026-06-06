@@ -75,6 +75,25 @@ def test_list_by_user_ready_only_false_omits_status_filter() -> None:
     collection.find.assert_called_once_with({"user_id": "user-1"})
 
 
+def test_delete_document_metadata_is_scoped_to_user() -> None:
+    collection = MagicMock()
+    collection.delete_one.return_value = MagicMock(deleted_count=1)
+    store = MongoDocumentStore(collection)
+
+    removed = store.delete("user-1", "doc-1")
+
+    collection.delete_one.assert_called_once_with({"id": "doc-1", "user_id": "user-1"})
+    assert removed is True
+
+
+def test_delete_document_metadata_returns_false_when_missing() -> None:
+    collection = MagicMock()
+    collection.delete_one.return_value = MagicMock(deleted_count=0)
+    store = MongoDocumentStore(collection)
+
+    assert store.delete("user-1", "doc-1") is False
+
+
 def test_delete_document_removes_chunks() -> None:
     # Guard the vector-store compensation path used on storage failure.
     from services.db.mongo_vector_store import MongoVectorStore
@@ -87,3 +106,18 @@ def test_delete_document_removes_chunks() -> None:
 
     collection.delete_many.assert_called_once_with({"doc_id": "doc-1"})
     assert removed == 3
+
+
+def test_delete_document_chunks_can_be_scoped_to_user() -> None:
+    from services.db.mongo_vector_store import MongoVectorStore
+
+    collection = MagicMock()
+    collection.delete_many.return_value = MagicMock(deleted_count=2)
+    store: MongoVectorStore = MongoVectorStore(collection)
+
+    removed = store.delete_document("doc-1", user_id="user-1")
+
+    collection.delete_many.assert_called_once_with(
+        {"doc_id": "doc-1", "user_id": "user-1"}
+    )
+    assert removed == 2
