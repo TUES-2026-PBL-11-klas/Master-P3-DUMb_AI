@@ -49,6 +49,15 @@ class StorageError(RAGException):
     """
 
 
+class QueryError(RAGException):
+    """
+    Raised when the RAG query pipeline cannot produce an answer.
+
+    Covers validation errors, embedding/search/generation failures, and
+    missing runtime dependencies needed by QueryService.
+    """
+
+
 class AuthError(RAGException):
     """
     Raised when an authentication attempt fails.

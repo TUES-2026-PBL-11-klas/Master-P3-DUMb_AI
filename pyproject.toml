@@ -21,21 +21,21 @@ name = "dumb-ai"
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
-    "tiktoken",
+    "bcrypt",
     "nltk",
     "pymongo",
-    "bcrypt",
+    "tiktoken",
 ]
 
 [project.optional-dependencies]
 mac = [
+    "huggingface_hub",
     "mlx-embeddings",
     "mlx-lm",
-    "huggingface_hub",
 ]
 linux = [
-    "llama-cpp-python",
     "huggingface_hub",
+    "llama-cpp-python",
 ]
 dev = [
     "pytest",

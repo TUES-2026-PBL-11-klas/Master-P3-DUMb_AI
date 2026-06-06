@@ -2,7 +2,7 @@
 Domain models for DUMb_AI.
 
 These classes describe the core objects in the project. They intentionally
-contain no database, API, TUI, or Ollama-specific code.
+contain no database, API, TUI, or model-runtime-specific code.
 """
 
 from __future__ import annotations

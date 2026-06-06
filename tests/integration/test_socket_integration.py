@@ -24,6 +24,7 @@ import base64
 import json
 import socket
 import threading
+import uuid
 from collections.abc import Generator
 from concurrent.futures import ThreadPoolExecutor
 
@@ -33,6 +34,7 @@ from client.ai_client import AIClient, AIClientError, MAX_UPLOAD_BYTES
 from services.dummy_server import (
     SUPPORTED_EXTENSIONS,
     _MemoryUserStore,
+    set_document_store,
     set_user_store,
     start_in_background,
 )
@@ -47,10 +49,30 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
+class _FakeDocumentStore:
+    def __init__(self) -> None:
+        self.calls: list[object] = []
+
+    def upsert(self, document: object) -> None:
+        pass
+
+    def list_by_user(self, user_id: object) -> list[dict[str, object]]:
+        self.calls.append(user_id)
+        return [
+            {
+                "document_id": str(uuid.UUID(int=456)),
+                "filename": "networking.md",
+                "uploaded_at": "2026-06-05T10:15:00",
+                "status": "ready",
+            }
+        ]
+
+
 @pytest.fixture
 def server() -> Generator[tuple[str, int], None, None]:
     # Fresh in-memory user store per test so tests don't see each other.
     set_user_store(_MemoryUserStore())
+    set_document_store(None)
 
     port = _free_port()
     srv, _thread = start_in_background(host="127.0.0.1", port=port)
@@ -59,6 +81,27 @@ def server() -> Generator[tuple[str, int], None, None]:
     finally:
         srv.shutdown()
         srv.server_close()
+        set_document_store(None)
+
+
+@pytest.fixture
+def server_with_document_store() -> Generator[
+    tuple[str, int, _FakeDocumentStore],
+    None,
+    None,
+]:
+    set_user_store(_MemoryUserStore())
+    store = _FakeDocumentStore()
+    set_document_store(store)
+
+    port = _free_port()
+    srv, _thread = start_in_background(host="127.0.0.1", port=port)
+    try:
+        yield "127.0.0.1", port, store
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        set_document_store(None)
 
 
 def _authed_client(
@@ -83,6 +126,40 @@ def _raw_send(host: str, port: int, message: dict[str, object]) -> dict[str, obj
     decoded = json.loads(line)
     assert isinstance(decoded, dict)
     return decoded
+
+
+# Document listing
+
+
+class TestDocumentListing:
+    def test_authenticated_user_can_list_documents(
+        self,
+        server_with_document_store: tuple[str, int, _FakeDocumentStore],
+    ) -> None:
+        host, port, store = server_with_document_store
+
+        with _authed_client(host, port, "alice") as c:
+            documents = c.list_documents()
+
+        assert documents == [
+            {
+                "document_id": str(uuid.UUID(int=456)),
+                "filename": "networking.md",
+                "uploaded_at": "2026-06-05T10:15:00",
+                "status": "ready",
+            }
+        ]
+        assert len(store.calls) == 1
+
+    def test_raw_document_list_without_auth_rejected(
+        self,
+        server_with_document_store: tuple[str, int, _FakeDocumentStore],
+    ) -> None:
+        host, port, _store = server_with_document_store
+
+        reply = _raw_send(host, port, {"type": "documents"})
+
+        assert reply == {"type": "error", "message": "not authenticated"}
 
 
 # Upload — happy path

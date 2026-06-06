@@ -51,7 +51,7 @@ from services.ingestion.parsers.registry import ParserRegistry
 from services.ingestion.parsers.txt import TxtParser
 from services.ingestion.service import IngestionService
 from services.shared.domain import Chunk, Document
-from services.shared.protocols import AIInterface, VectorStore
+from services.shared.protocols import AIInterface, DocumentStore, VectorStore
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +104,7 @@ def build_ingestion_service_with(
     store: VectorStore[Chunk],
     embed_client: AIInterface,
     *,
+    document_store: "DocumentStore | None" = None,
     chunk_size: int = 400,
     embed_model: str = "bge-m3",
     max_workers: int = 4,
@@ -114,6 +115,10 @@ def build_ingestion_service_with(
     This is the DI seam: tests inject a mongomock-backed store and a fake
     embed client (any object satisfying AIInterface — embed / embed_batch);
     production passes the real ones built by build_ingestion_service().
+
+    *document_store*, when supplied, is handed to the service so it can persist
+    document metadata across the lifecycle (PARSED before chunks → READY after
+    storage → FAILED on error). Leave it None to skip metadata persistence.
 
     The observer order is the canonical chunk → embed → store; the service
     runs observers in registration order, so order matters here. *embed_model*
@@ -127,6 +132,7 @@ def build_ingestion_service_with(
             EmbeddingObserver(embed_client, model=embed_model),
             StorageObserver(store),
         ],
+        document_store=document_store,
         max_workers=max_workers,
     )
     logger.info("ingestion pipeline assembled: %r", service)
@@ -136,6 +142,7 @@ def build_ingestion_service_with(
 def build_ingestion_service(
     mongo_uri: str,
     *,
+    document_store: "DocumentStore | None" = None,
     bge_model_path: str | None = None,
     chunk_size: int = 400,
     embed_model: str = "bge-m3",
@@ -147,6 +154,11 @@ def build_ingestion_service(
 
     Args:
         mongo_uri:      MongoDB connection string (Atlas Vector Search).
+        document_store: Optional DocumentStore the service uses to persist
+                        document metadata across the lifecycle. dummy_server
+                        builds one MongoDocumentStore and passes the same
+                        instance here and to set_document_store(), so the
+                        pipeline writes and the listing reads share it.
         bge_model_path: Optional override for the Linux BGE-M3 .gguf path.
                         Ignored on macOS (which uses the mlx model). When None,
                         PlatformEmbeddingClient falls back to its default
@@ -178,6 +190,7 @@ def build_ingestion_service(
     return build_ingestion_service_with(
         store,
         embed_client,
+        document_store=document_store,
         chunk_size=chunk_size,
         embed_model=embed_model,
         max_workers=max_workers,

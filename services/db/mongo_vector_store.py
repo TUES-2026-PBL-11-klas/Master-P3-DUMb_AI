@@ -304,6 +304,31 @@ class MongoVectorStore(Generic[T_inv]):
 
         return [self._doc_to_chunk(doc) for doc in raw_docs]
 
+    def delete_document(self, doc_id: UUID | str) -> int:
+        """
+        Delete every chunk belonging to *doc_id*. Returns the number removed.
+
+        Used as a compensating action: if storing a document's chunks fails
+        part-way through (an unordered bulk write can persist some chunks
+        before raising), the caller removes the partial set so the index
+        never carries chunks for a document that did not finish ingesting.
+        Deleting a doc_id with no chunks is a harmless no-op (returns 0).
+
+        Raises:
+            StorageError: if the delete itself fails.
+        """
+        try:
+            result = self._col.delete_many({"doc_id": str(doc_id)})
+        except Exception as exc:
+            raise StorageError(f"delete_document({doc_id}) failed: {exc}") from exc
+        deleted = getattr(result, "deleted_count", 0) or 0
+        logger.info(
+            "MongoVectorStore.delete_document: removed %d chunk(s) for %s",
+            deleted,
+            doc_id,
+        )
+        return deleted
+
     # Serialization helpers
 
     @staticmethod

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-DocChat TUI - AI-powered document chat interface (stub/prototype)
+DocChat TUI - AI-powered document chat interface.
 
 Login and signup are real: credentials are sent to the dummy server over
 a newline-delimited JSON socket, where they are hashed and stored. The
@@ -21,8 +21,9 @@ Then launch the TUI in another:
     python -m client.tui --offline                       # force local stub
 """
 
+from __future__ import annotations
+
 import argparse
-import curses
 import os
 import sys
 import time
@@ -30,18 +31,29 @@ import textwrap
 from datetime import datetime
 from typing import Any
 
+try:
+    import curses
+except ModuleNotFoundError:
+    curses = None  # type: ignore[assignment]
+
 # Make ``python client/tui.py`` work as well as ``python -m client.tui``.
 if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from client.ai_client import AIClient, AIClientError, MAX_UPLOAD_BYTES
+from client.ai_client import (
+    AIClient,
+    AIClientError,
+    AnswerResponse,
+    AnswerSource,
+    MAX_UPLOAD_BYTES,
+)
 
 # In-memory state
 state: dict[str, Any] = {
     "logged_in": False,
     "username": "",
     "documents": [],  # {"name", "size", "uploaded_at"}
-    "messages": [],  # {"role": "user"|"ai", "text", "time"}
+    "messages": [],  # {"role": "user"|"ai", "text", "time", "sources"?}
     "current_screen": "login",
     "ai_client": None,  # AIClient or None when running --offline
     "ai_status": "offline",  # "online" | "offline" | "error: ..."
@@ -64,24 +76,84 @@ def stub_ai_response() -> str:
     return r
 
 
-def fetch_ai_response(text: str) -> str:
+def fetch_ai_response(text: str) -> AnswerResponse:
     """
     Ask the dummy server for a reply, with graceful fallback.
 
     Updates ``state["ai_status"]`` so the chat screen can show the
-    current connection state. Always returns a string -- never raises.
+    current connection state. Always returns an AnswerResponse -- never raises.
     """
     client = state.get("ai_client")
     if client is None:
         state["ai_status"] = "offline"
-        return stub_ai_response()
+        return AnswerResponse(answer=stub_ai_response())
     try:
-        answer = client.ask(text)
+        answer = client.ask_with_sources(text)
         state["ai_status"] = "online"
         return answer
     except AIClientError as exc:
         state["ai_status"] = f"error: {exc}"
-        return f"[connection lost] {exc}  (falling back to offline stub)"
+        return AnswerResponse(
+            answer=f"[server error] {exc}"
+        )
+
+
+def format_source(source: AnswerSource, index: int) -> str:
+    """Build a compact, readable source label for the chat transcript."""
+    metadata = source.metadata
+    name = (
+        metadata.get("filename")
+        or metadata.get("source_file")
+        or metadata.get("document")
+        or source.doc_id
+    )
+    parts = [f"[{index}] {name}", f"chunk {source.position}"]
+
+    page = metadata.get("page")
+    if page is not None:
+        parts.append(f"page {page}")
+
+    if source.similarity is not None:
+        parts.append(f"score {source.similarity:.3f}")
+
+    return " | ".join(str(part) for part in parts)
+
+
+def refresh_documents_from_server() -> tuple[bool, str]:
+    """Reload the authenticated user's documents from the server, if available."""
+    client = state.get("ai_client")
+    if client is None:
+        return False, "offline"
+
+    try:
+        documents = client.list_documents()
+    except AIClientError as exc:
+        state["ai_status"] = f"error: {exc}"
+        return False, str(exc)
+
+    state["documents"] = [_document_summary_for_tui(doc) for doc in documents]
+    state["ai_status"] = f"online ({client.host}:{client.port})"
+    return True, ""
+
+
+def _document_summary_for_tui(doc: dict[str, Any]) -> dict[str, Any]:
+    uploaded_at = str(doc.get("uploaded_at") or "")
+    if "T" in uploaded_at:
+        uploaded_at = uploaded_at.replace("T", " ")[:16]
+    elif not uploaded_at:
+        uploaded_at = "unknown"
+
+    size = doc.get("size", 0)
+    if not isinstance(size, (int, float)):
+        size = 0
+
+    return {
+        "id": str(doc.get("document_id") or doc.get("id") or ""),
+        "name": str(doc.get("filename") or doc.get("name") or ""),
+        "size": int(size),
+        "uploaded_at": uploaded_at,
+        "status": str(doc.get("status") or ""),
+    }
 
 
 def normalize_input_path(raw: str | None) -> str:
@@ -170,14 +242,16 @@ def upload_file_to_server(path: str) -> tuple[bool, str]:
 
     state["ai_status"] = f"online ({client.host}:{client.port})"
     chunks = ack.get("chunks")  # absent when the server runs the validate-only stub
-    state["documents"].append(
-        {
-            "name": ack.get("filename", name),
-            "size": ack.get("size", size),
-            "chunks": chunks,
-            "uploaded_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
-        }
-    )
+    refreshed, _ = refresh_documents_from_server()
+    if not refreshed:
+        state["documents"].append(
+            {
+                "name": ack.get("filename", name),
+                "size": ack.get("size", size),
+                "chunks": chunks,
+                "uploaded_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            }
+        )
     detail = f"{size} bytes" if chunks is None else f"{size} bytes, {chunks} chunks"
     return True, f"'{name}' uploaded ({detail})"
 
@@ -464,6 +538,7 @@ def screen_login(stdscr: curses.window) -> None:
 
         state["username"] = confirmed
         state["logged_in"] = True
+        refresh_documents_from_server()
         safe_addstr(
             stdscr,
             by + 7,
@@ -580,6 +655,7 @@ def screen_signup(stdscr: curses.window) -> None:
 
         state["username"] = confirmed
         state["logged_in"] = True
+        refresh_documents_from_server()
         safe_addstr(
             stdscr,
             by + 10,
@@ -803,6 +879,23 @@ def screen_chat(stdscr: curses.window) -> None:
             for j, line in enumerate(wrapped):
                 pfx = prefix if j == 0 else " " * len(prefix)
                 all_lines.append((attr, pfx + line))
+            if role == "ai" and m.get("sources"):
+                source_prefix = " " * len(prefix)
+                all_lines.append(
+                    (
+                        curses.color_pair(C_DIM) | curses.A_DIM,
+                        source_prefix + "Sources:",
+                    )
+                )
+                for source_index, source in enumerate(m["sources"], start=1):
+                    source_text = format_source(source, source_index)
+                    for source_line in textwrap.wrap(source_text, wrap_w) or [""]:
+                        all_lines.append(
+                            (
+                                curses.color_pair(C_DIM) | curses.A_DIM,
+                                source_prefix + source_line,
+                            )
+                        )
             all_lines.append((curses.color_pair(C_NORMAL), ""))
 
         total_lines = len(all_lines)
@@ -872,10 +965,15 @@ def screen_chat(stdscr: curses.window) -> None:
                 )
                 stdscr.refresh()
 
-                answer = fetch_ai_response(text)
+                response = fetch_ai_response(text)
                 reply_time = datetime.now().strftime("%H:%M")
                 state["messages"].append(
-                    {"role": "ai", "text": answer, "time": reply_time}
+                    {
+                        "role": "ai",
+                        "text": response.answer,
+                        "time": reply_time,
+                        "sources": response.sources,
+                    }
                 )
         elif ch in (ord("b"), ord("B")) and not input_buf:
             break
@@ -946,6 +1044,12 @@ def _setup_ai_client(args: argparse.Namespace) -> None:
 
 
 if __name__ == "__main__":
+    if curses is None:
+        raise RuntimeError(
+            "The curses module is not available in this Python environment. "
+            "Run the TUI from WSL/Linux/macOS, or install a curses-compatible "
+            "Windows environment."
+        )
     cli_args = _parse_cli()
     _setup_ai_client(cli_args)
     try:

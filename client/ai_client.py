@@ -11,6 +11,7 @@ Wire protocol (see services.dummy_server for the server side):
         {"type": "login",  "username": <str>, "password": <str>}
         {"type": "signup", "username": <str>, "password": <str>}
         {"type": "logout"}
+        {"type": "documents"}                        # session-authenticated
         {"type": "query",  "text": <str>}            # session-authenticated
         {"type": "upload", "filename": <str>,        # session-authenticated
 
@@ -20,7 +21,8 @@ Wire protocol (see services.dummy_server for the server side):
         {"type": "pong"}
         {"type": "auth_ok",    "username": <str>}
         {"type": "logout_ok"}
-        {"type": "answer",     "text": <str>}
+        {"type": "documents",   "documents": <list>}
+        {"type": "answer",     "text": <str>, "sources": <list>}
         {"type": "upload_ack", "filename": <str>, "size": <int>}
         {"type": "error",      "message": <str>}
 
@@ -33,7 +35,7 @@ Session model:
       1. If the underlying socket reconnects (e.g. after a transport
          error), the session on the *new* socket is empty. AIClient
          re-runs the last successful login automatically so callers
-         don't need to think about it. See _ensure_session().
+         don't need to think about it. See _authed_round_trip().
       2. Closing the client and opening a new one is a clean logout —
          no token to revoke server-side.
 """
@@ -41,6 +43,7 @@ Session model:
 from __future__ import annotations
 
 import base64
+from dataclasses import dataclass, field
 import json
 import os
 import socket
@@ -62,6 +65,24 @@ MAX_UPLOAD_BYTES = 5 * 1024 * 1024  # 5 MB
 
 class AIClientError(RuntimeError):
     """Raised when the client cannot complete a request."""
+
+
+@dataclass(frozen=True)
+class AnswerSource:
+    """Source metadata returned with a RAG answer."""
+
+    doc_id: str
+    position: int
+    similarity: float | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class AnswerResponse:
+    """Structured answer returned by AIClient.ask_with_sources()."""
+
+    answer: str
+    sources: list[AnswerSource] = field(default_factory=list)
 
 
 class AIClient:
@@ -162,7 +183,16 @@ class AIClient:
 
     def ask(self, text: str) -> str:
         """
-        Send a query and return the AI's answer text.
+        Send a query and return only the AI's answer text.
+
+        Kept for backwards compatibility with the existing TUI code. Use
+        ask_with_sources() when the caller also needs RAG citations.
+        """
+        return self.ask_with_sources(text).answer
+
+    def ask_with_sources(self, text: str) -> AnswerResponse:
+        """
+        Send a query and return the AI's answer with source metadata.
 
         The connection must be authenticated — call login() or signup()
         first. The server stamps the answer to the session's user
@@ -180,10 +210,58 @@ class AIClient:
             answer = reply.get("text", "")
             if not isinstance(answer, str):
                 raise AIClientError(f"non-string answer field: {answer!r}")
-            return answer
+            return AnswerResponse(
+                answer=answer,
+                sources=self._parse_sources(reply.get("sources", [])),
+            )
         if reply.get("type") == "error":
             raise AIClientError(f"server error: {reply.get('message', 'unknown')}")
         raise AIClientError(f"unexpected reply type: {reply.get('type')!r}")
+
+    @staticmethod
+    def _parse_sources(raw_sources: object) -> list[AnswerSource]:
+        if raw_sources is None:
+            return []
+        if not isinstance(raw_sources, list):
+            raise AIClientError(f"non-list sources field: {raw_sources!r}")
+
+        sources: list[AnswerSource] = []
+        for raw_source in raw_sources:
+            if not isinstance(raw_source, dict):
+                raise AIClientError(f"invalid source entry: {raw_source!r}")
+
+            doc_id = raw_source.get("doc_id")
+            if not isinstance(doc_id, str):
+                raise AIClientError(f"source doc_id must be a string: {raw_source!r}")
+
+            position = raw_source.get("position")
+            if not isinstance(position, int):
+                raise AIClientError(f"source position must be an int: {raw_source!r}")
+
+            similarity = raw_source.get("similarity")
+            if similarity is not None and not isinstance(similarity, (int, float)):
+                raise AIClientError(
+                    f"source similarity must be numeric: {raw_source!r}"
+                )
+
+            metadata = raw_source.get("metadata", {})
+            if metadata is None:
+                metadata = {}
+            if not isinstance(metadata, dict):
+                raise AIClientError(
+                    f"source metadata must be an object: {raw_source!r}"
+                )
+
+            sources.append(
+                AnswerSource(
+                    doc_id=doc_id,
+                    position=position,
+                    similarity=float(similarity) if similarity is not None else None,
+                    metadata=metadata,
+                )
+            )
+
+        return sources
 
     def login(self, username: str, password: str) -> str:
         """
@@ -287,6 +365,27 @@ class AIClient:
         kind = reply.get("type")
         if kind == "upload_ack":
             return reply
+        if kind == "error":
+            raise AIClientError(f"server error: {reply.get('message', 'unknown')}")
+        raise AIClientError(f"unexpected reply type: {kind!r}")
+
+    def list_documents(self) -> list[dict[str, Any]]:
+        """
+        Return uploaded document metadata for the authenticated user.
+
+        Raises:
+            AIClientError: on missing session, transport failure, or server error.
+        """
+        if not self.is_authenticated:
+            raise AIClientError("not authenticated - call login() or signup() first")
+
+        reply = self._authed_round_trip({"type": "documents"})
+        kind = reply.get("type")
+        if kind == "documents":
+            documents = reply.get("documents", [])
+            if not isinstance(documents, list):
+                raise AIClientError(f"non-list documents field: {documents!r}")
+            return [doc for doc in documents if isinstance(doc, dict)]
         if kind == "error":
             raise AIClientError(f"server error: {reply.get('message', 'unknown')}")
         raise AIClientError(f"unexpected reply type: {kind!r}")
