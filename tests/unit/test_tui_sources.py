@@ -12,13 +12,16 @@ from client import tui
 def reset_tui_state() -> Iterator[None]:
     original_client = tui.state.get("ai_client")
     original_status = tui.state.get("ai_status")
+    original_documents = list(tui.state.get("documents", []))
     try:
         tui.state["ai_client"] = None
         tui.state["ai_status"] = "offline"
+        tui.state["documents"] = []
         yield
     finally:
         tui.state["ai_client"] = original_client
         tui.state["ai_status"] = original_status
+        tui.state["documents"] = original_documents
 
 
 class FakeClient:
@@ -33,6 +36,7 @@ class FakeClient:
         self.response = response or AnswerResponse(answer="Answer.", sources=[])
         self.documents = documents or []
         self.questions: list[str] = []
+        self.deleted_doc_ids: list[str] = []
 
     def ask_with_sources(self, text: str) -> AnswerResponse:
         self.questions.append(text)
@@ -41,10 +45,20 @@ class FakeClient:
     def list_documents(self) -> list[dict[str, object]]:
         return self.documents
 
+    def delete_document(self, doc_id: str) -> dict[str, object]:
+        self.deleted_doc_ids.append(doc_id)
+        self.documents = [doc for doc in self.documents if doc.get("document_id") != doc_id]
+        return {"type": "delete_ok", "doc_id": doc_id, "deleted_chunks": 2}
+
 
 class FailingClient:
     def ask_with_sources(self, text: str) -> AnswerResponse:
         raise AIClientError("query service unavailable")
+
+
+class FailingDeleteClient(FakeClient):
+    def delete_document(self, doc_id: str) -> dict[str, object]:
+        raise AIClientError("document not found")
 
 
 def test_format_source_uses_filename_page_chunk_and_score() -> None:
@@ -139,3 +153,59 @@ def test_refresh_documents_from_server_reports_offline() -> None:
 
     assert not ok
     assert message == "offline"
+
+
+def test_delete_document_on_server_refreshes_after_success() -> None:
+    client = FakeClient(
+        documents=[
+            {
+                "document_id": "doc-2",
+                "filename": "remaining.md",
+                "uploaded_at": "2026-06-05T10:16:00",
+                "status": "ready",
+            }
+        ]
+    )
+    tui.state["ai_client"] = client
+    tui.state["documents"] = [
+        {
+            "id": "doc-1",
+            "name": "networking.md",
+            "size": 0,
+            "uploaded_at": "2026-06-05 10:15",
+            "status": "ready",
+        }
+    ]
+
+    ok, message = tui.delete_document_on_server(tui.state["documents"][0])
+
+    assert ok
+    assert "deleted from server" in message
+    assert client.deleted_doc_ids == ["doc-1"]
+    assert tui.state["documents"] == [
+        {
+            "id": "doc-2",
+            "name": "remaining.md",
+            "size": 0,
+            "uploaded_at": "2026-06-05 10:16",
+            "status": "ready",
+        }
+    ]
+
+
+def test_delete_document_on_server_does_not_remove_local_doc_on_error() -> None:
+    tui.state["ai_client"] = FailingDeleteClient()
+    document = {
+        "id": "doc-1",
+        "name": "networking.md",
+        "size": 0,
+        "uploaded_at": "2026-06-05 10:15",
+        "status": "ready",
+    }
+    tui.state["documents"] = [document]
+
+    ok, message = tui.delete_document_on_server(document)
+
+    assert not ok
+    assert "Delete failed" in message
+    assert tui.state["documents"] == [document]

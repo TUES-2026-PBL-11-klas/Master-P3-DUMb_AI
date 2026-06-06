@@ -16,6 +16,7 @@ Client -> Server:
     {"type": "signup", "username": "<str>", "password": "<str>"}
     {"type": "logout"}                              # optional; ends the session
     {"type": "documents"}                           # session-authenticated
+    {"type": "delete_document", "doc_id": "<str>"}  # session-authenticated
     {"type": "query",  "text": "<str>"}             # session-authenticated
     {"type": "upload", "filename": "<str>",         # session-authenticated
                        "bytes_b64": "<base64 str>"}
@@ -25,6 +26,8 @@ Server -> Client:
     {"type": "auth_ok",    "username": "<str>"}     # reply to login / signup
     {"type": "logout_ok"}
     {"type": "documents",   "documents": <list>}
+    {"type": "delete_ok",  "doc_id": "<str>",       # reply to delete_document
+                           "deleted_chunks": <int>}
     {"type": "answer",     "text": "<str>",        # reply to query
                            "sources": <list>}       # citations (may be empty)
     {"type": "upload_ack", "filename": "<str>", "size": <int>,
@@ -207,6 +210,14 @@ class _MemoryDocumentStore:
         with self._lock:
             self._by_id[str(document.id)] = document
 
+    def delete(self, user_id: object, doc_id: object) -> bool:
+        with self._lock:
+            existing = self._by_id.get(str(doc_id))
+            if existing is None or str(existing.user_id) != str(user_id):
+                return False
+            del self._by_id[str(doc_id)]
+            return True
+
     def list_by_user(
         self,
         user_id: object,
@@ -263,6 +274,19 @@ def set_ingestion_service(service: IngestionServiceProtocol | None) -> None:
     """Swap the active ingestion pipeline (used by main() and by tests)."""
     global _ingestion_service
     _ingestion_service = service
+
+
+# Vector store handle, used only to delete a document's chunks when the user
+# removes it. None in offline/demo mode (stub uploads create no chunks). It is
+# the same MongoVectorStore instance the ingestion pipeline writes to, wired in
+# main(); anything exposing delete_document(doc_id, *, user_id=...) satisfies it.
+_vector_store: Any | None = None
+
+
+def set_vector_store(store: Any | None) -> None:
+    """Swap the active vector store used for chunk deletion."""
+    global _vector_store
+    _vector_store = store
 
 
 # Password hashing
@@ -490,6 +514,11 @@ class _DummyAIHandler(socketserver.StreamRequestHandler):
             if user is None:
                 return {"type": "error", "message": "not authenticated"}
             return self._list_documents(user)
+        if kind == "delete_document":
+            user = self._require_session()
+            if user is None:
+                return {"type": "error", "message": "not authenticated"}
+            return self._delete_document(user, msg)
         if kind == "query":
             user = self._require_session()
             if user is None:
@@ -613,6 +642,74 @@ class _DummyAIHandler(socketserver.StreamRequestHandler):
             return {"type": "error", "message": f"document list failed: {exc}"}
 
         return {"type": "documents", "documents": documents}
+
+    def _delete_document(self, user: UserAcc, msg: dict[str, Any]) -> dict[str, Any]:
+        """
+        Delete one of the caller's documents from the database.
+
+        Removes the chunks (vector store) BEFORE the metadata row (document
+        store). That order preserves the project's no-orphaned-chunks
+        invariant: a chunk's doc_id always has a metadata row, so a failure
+        between the two steps can only ever leave a metadata row with no
+        chunks — recoverable and never an orphaned chunk. Both deletes are
+        scoped to user.id, so a caller can never remove another user's data
+        even by guessing a doc_id.
+        """
+        doc_id = str(msg.get("doc_id", "")).strip()
+        if not doc_id:
+            return {"type": "error", "message": "missing 'doc_id' field"}
+
+        if _document_store is None:
+            logger.warning(
+                "delete from %s rejected: document store is not configured",
+                user.username,
+            )
+            return {"type": "error", "message": "document store is not configured"}
+
+        # 1) Chunks first (scoped to the owner). Best-effort: if there is no
+        #    vector store (offline/stub) there are no chunks to remove.
+        deleted_chunks = 0
+        if _vector_store is not None:
+            try:
+                deleted_chunks = int(
+                    _vector_store.delete_document(doc_id, user_id=user.id) or 0
+                )
+            except Exception as exc:
+                # Don't remove the metadata if we couldn't remove the chunks —
+                # otherwise we'd orphan them. Surface the error so the client
+                # can retry (the operation is idempotent).
+                logger.warning(
+                    "delete from %s: chunk removal for %s failed: %s",
+                    user.username,
+                    doc_id,
+                    exc,
+                )
+                return {"type": "error", "message": f"chunk deletion failed: {exc}"}
+
+        # 2) Metadata row (scoped to the owner).
+        try:
+            existed = _document_store.delete(user.id, doc_id)
+        except StorageError as exc:
+            logger.warning("delete from %s failed: %s", user.username, exc)
+            return {"type": "error", "message": str(exc)}
+        except Exception as exc:
+            logger.exception("delete from %s failed unexpectedly", user.username)
+            return {"type": "error", "message": f"delete failed: {exc}"}
+
+        if not existed and deleted_chunks == 0:
+            return {"type": "error", "message": "document not found"}
+
+        logger.info(
+            "delete from %s: removed doc %s (%d chunk(s))",
+            user.username,
+            doc_id,
+            deleted_chunks,
+        )
+        return {
+            "type": "delete_ok",
+            "doc_id": doc_id,
+            "deleted_chunks": deleted_chunks,
+        }
 
     def _handle_upload(self, user: UserAcc, msg: dict[str, Any]) -> dict[str, Any]:
         """
@@ -877,12 +974,18 @@ def main() -> None:
     # the stub registers a READY document so listing + citations still demo.
     if mongo_uri and mongo_document_store is not None:
         try:
+            from services.db.mongo_vector_store import MongoVectorStore
             from services.ingestion.composition import build_ingestion_service
 
+            # Build ONE vector store and share it: the pipeline writes chunks
+            # to it, and the delete handler removes chunks from it.
+            vector_store: Any = MongoVectorStore.from_uri(mongo_uri)
+            set_vector_store(vector_store)
             set_ingestion_service(
                 build_ingestion_service(
                     mongo_uri,
                     document_store=mongo_document_store,
+                    vector_store=vector_store,
                     bge_model_path=os.environ.get("BGE_MODEL_PATH"),
                 )
             )

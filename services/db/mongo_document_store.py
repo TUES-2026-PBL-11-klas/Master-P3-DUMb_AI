@@ -117,6 +117,32 @@ class MongoDocumentStore:
 
         return [self._doc_to_summary(doc) for doc in docs]
 
+    def delete(self, user_id: UUID | str, doc_id: UUID | str) -> bool:
+        """
+        Delete the metadata row owned by *user_id* with id *doc_id*.
+
+        Scoped to the owner (both fields in the filter) so a user can only
+        ever remove their own documents. Returns True if a row was removed,
+        False if nothing matched.
+
+        Raises:
+            StorageError: if the delete itself fails.
+        """
+        try:
+            result = self._col.delete_one({"id": str(doc_id), "user_id": str(user_id)})
+        except Exception as exc:
+            raise StorageError(
+                f"delete(user={user_id}, doc={doc_id}) failed: {exc}"
+            ) from exc
+        deleted = getattr(result, "deleted_count", 0) or 0
+        logger.info(
+            "MongoDocumentStore.delete: removed %d row(s) for doc %s (user %s)",
+            deleted,
+            doc_id,
+            user_id,
+        )
+        return deleted > 0
+
     @staticmethod
     def _document_to_doc(document: Document) -> dict[str, Any]:
         return {

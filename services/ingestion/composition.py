@@ -143,6 +143,7 @@ def build_ingestion_service(
     mongo_uri: str,
     *,
     document_store: "DocumentStore | None" = None,
+    vector_store: "VectorStore[Chunk] | None" = None,
     bge_model_path: str | None = None,
     chunk_size: int = 400,
     embed_model: str = "bge-m3",
@@ -159,6 +160,10 @@ def build_ingestion_service(
                         builds one MongoDocumentStore and passes the same
                         instance here and to set_document_store(), so the
                         pipeline writes and the listing reads share it.
+        vector_store:   Optional pre-built VectorStore[Chunk]. When given it is
+                        used as-is (so the caller can share the same instance
+                        with the delete handler); when None a MongoVectorStore
+                        is constructed from *mongo_uri*.
         bge_model_path: Optional override for the Linux BGE-M3 .gguf path.
                         Ignored on macOS (which uses the mlx model). When None,
                         PlatformEmbeddingClient falls back to its default
@@ -177,7 +182,11 @@ def build_ingestion_service(
         OSError:      if PlatformEmbeddingClient can't init a backend for the
                       current platform.
     """
-    store: MongoVectorStore[Chunk] = MongoVectorStore.from_uri(mongo_uri)
+    store: VectorStore[Chunk] = (
+        vector_store
+        if vector_store is not None
+        else MongoVectorStore.from_uri(mongo_uri)
+    )
 
     # Lazy import: PlatformEmbeddingClient pulls in mlx_embeddings / llama_cpp,
     # which only the production path needs — tests using the DI seam don't.

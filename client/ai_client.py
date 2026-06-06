@@ -11,7 +11,8 @@ Wire protocol (see services.dummy_server for the server side):
         {"type": "login",  "username": <str>, "password": <str>}
         {"type": "signup", "username": <str>, "password": <str>}
         {"type": "logout"}
-        {"type": "documents"}                        # session-authenticated
+        {"type": "documents"}                         # session-authenticated
+        {"type": "delete_document", "doc_id": <str>}  # session-authenticated
         {"type": "query",  "text": <str>}            # session-authenticated
         {"type": "upload", "filename": <str>,        # session-authenticated
 
@@ -22,6 +23,7 @@ Wire protocol (see services.dummy_server for the server side):
         {"type": "auth_ok",    "username": <str>}
         {"type": "logout_ok"}
         {"type": "documents",   "documents": <list>}
+        {"type": "delete_ok",  "doc_id": <str>, "deleted_chunks": <int>}
         {"type": "answer",     "text": <str>, "sources": <list>}
         {"type": "upload_ack", "filename": <str>, "size": <int>}
         {"type": "error",      "message": <str>}
@@ -390,7 +392,31 @@ class AIClient:
             raise AIClientError(f"server error: {reply.get('message', 'unknown')}")
         raise AIClientError(f"unexpected reply type: {kind!r}")
 
-    # -- session-aware transport ---------------------------------------------
+    def delete_document(self, doc_id: str) -> dict[str, Any]:
+        """
+        Delete one of the authenticated user's documents from the database.
+
+        Removes both the document metadata and its stored chunks server-side.
+        Returns the server's delete_ok reply (includes ``deleted_chunks``).
+
+        Raises:
+            AIClientError: on missing session, missing doc_id, transport
+                           failure, or server error (e.g. document not found).
+        """
+        if not self.is_authenticated:
+            raise AIClientError("not authenticated - call login() or signup() first")
+        doc_id = str(doc_id).strip()
+        if not doc_id:
+            raise AIClientError("doc_id is required")
+
+        reply = self._authed_round_trip({"type": "delete_document", "doc_id": doc_id})
+        kind = reply.get("type")
+        if kind == "delete_ok":
+            return reply
+        if kind == "error":
+            raise AIClientError(f"server error: {reply.get('message', 'unknown')}")
+        raise AIClientError(f"unexpected reply type: {kind!r}")
+
     def _auth(self, mode: str, username: str, password: str) -> str:
         """
         Send a login or signup, cache credentials on success.

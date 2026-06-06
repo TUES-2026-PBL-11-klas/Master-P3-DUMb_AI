@@ -158,3 +158,35 @@ def test_list_documents_requires_list_field() -> None:
 
     with pytest.raises(AIClientError, match="non-list documents"):
         client.list_documents()
+
+
+def test_delete_document_sends_delete_request() -> None:
+    client = _client_with_authed_reply(
+        {"type": "delete_document", "doc_id": "doc-1"},
+        {"type": "delete_ok", "doc_id": "doc-1", "deleted_chunks": 3},
+    )
+
+    assert client.delete_document(" doc-1 ") == {
+        "type": "delete_ok",
+        "doc_id": "doc-1",
+        "deleted_chunks": 3,
+    }
+
+
+def test_delete_document_requires_doc_id() -> None:
+    client = AIClient()
+    client._username = "alice"
+    client._password = "secret"
+
+    with pytest.raises(AIClientError, match="doc_id is required"):
+        client.delete_document("  ")
+
+
+def test_delete_document_raises_server_error() -> None:
+    client = _client_with_authed_reply(
+        {"type": "delete_document", "doc_id": "doc-1"},
+        {"type": "error", "message": "document not found"},
+    )
+
+    with pytest.raises(AIClientError, match="document not found"):
+        client.delete_document("doc-1")

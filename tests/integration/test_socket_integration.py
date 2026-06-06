@@ -35,6 +35,7 @@ from services.dummy_server import (
     SUPPORTED_EXTENSIONS,
     _MemoryUserStore,
     set_document_store,
+    set_vector_store,
     set_user_store,
     start_in_background,
 )
@@ -49,23 +50,61 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-class _FakeDocumentStore:
+class _FakeVectorStore:
     def __init__(self) -> None:
+        self.doc_owners: dict[str, str] = {}
+        self.delete_calls: list[tuple[str, str | None]] = []
+
+    def seed(self, doc_id: str, user_id: object) -> None:
+        self.doc_owners[doc_id] = str(user_id)
+
+    def delete_document(self, doc_id: object, *, user_id: object | None = None) -> int:
+        owner = str(user_id) if user_id is not None else None
+        doc_key = str(doc_id)
+        self.delete_calls.append((doc_key, owner))
+        if self.doc_owners.get(doc_key) != owner:
+            return 0
+        del self.doc_owners[doc_key]
+        return 2
+
+
+class _FakeDocumentStore:
+    def __init__(self, vector_store: _FakeVectorStore | None = None) -> None:
         self.calls: list[object] = []
+        self.delete_calls: list[tuple[str, str]] = []
+        self._vector_store = vector_store
+        self._docs_by_user: dict[str, list[dict[str, object]]] = {}
 
     def upsert(self, document: object) -> None:
         pass
 
     def list_by_user(self, user_id: object) -> list[dict[str, object]]:
         self.calls.append(user_id)
-        return [
-            {
-                "document_id": str(uuid.UUID(int=456)),
-                "filename": "networking.md",
-                "uploaded_at": "2026-06-05T10:15:00",
-                "status": "ready",
-            }
-        ]
+        user_key = str(user_id)
+        if user_key not in self._docs_by_user:
+            doc_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"doc:{user_key}"))
+            self._docs_by_user[user_key] = [
+                {
+                    "document_id": doc_id,
+                    "filename": "networking.md",
+                    "uploaded_at": "2026-06-05T10:15:00",
+                    "status": "ready",
+                }
+            ]
+            if self._vector_store is not None:
+                self._vector_store.seed(doc_id, user_key)
+        return list(self._docs_by_user[user_key])
+
+    def delete(self, user_id: object, doc_id: object) -> bool:
+        user_key = str(user_id)
+        doc_key = str(doc_id)
+        self.delete_calls.append((user_key, doc_key))
+        docs = self._docs_by_user.get(user_key, [])
+        remaining = [doc for doc in docs if doc.get("document_id") != doc_key]
+        if len(remaining) == len(docs):
+            return False
+        self._docs_by_user[user_key] = remaining
+        return True
 
 
 @pytest.fixture
@@ -73,6 +112,7 @@ def server() -> Generator[tuple[str, int], None, None]:
     # Fresh in-memory user store per test so tests don't see each other.
     set_user_store(_MemoryUserStore())
     set_document_store(None)
+    set_vector_store(None)
 
     port = _free_port()
     srv, _thread = start_in_background(host="127.0.0.1", port=port)
@@ -82,26 +122,30 @@ def server() -> Generator[tuple[str, int], None, None]:
         srv.shutdown()
         srv.server_close()
         set_document_store(None)
+        set_vector_store(None)
 
 
 @pytest.fixture
 def server_with_document_store() -> Generator[
-    tuple[str, int, _FakeDocumentStore],
+    tuple[str, int, _FakeDocumentStore, _FakeVectorStore],
     None,
     None,
 ]:
     set_user_store(_MemoryUserStore())
-    store = _FakeDocumentStore()
+    vector_store = _FakeVectorStore()
+    store = _FakeDocumentStore(vector_store)
     set_document_store(store)
+    set_vector_store(vector_store)
 
     port = _free_port()
     srv, _thread = start_in_background(host="127.0.0.1", port=port)
     try:
-        yield "127.0.0.1", port, store
+        yield "127.0.0.1", port, store, vector_store
     finally:
         srv.shutdown()
         srv.server_close()
         set_document_store(None)
+        set_vector_store(None)
 
 
 def _authed_client(
@@ -134,32 +178,92 @@ def _raw_send(host: str, port: int, message: dict[str, object]) -> dict[str, obj
 class TestDocumentListing:
     def test_authenticated_user_can_list_documents(
         self,
-        server_with_document_store: tuple[str, int, _FakeDocumentStore],
+        server_with_document_store: tuple[
+            str, int, _FakeDocumentStore, _FakeVectorStore
+        ],
     ) -> None:
-        host, port, store = server_with_document_store
+        host, port, store, _vector_store = server_with_document_store
 
         with _authed_client(host, port, "alice") as c:
             documents = c.list_documents()
 
-        assert documents == [
-            {
-                "document_id": str(uuid.UUID(int=456)),
-                "filename": "networking.md",
-                "uploaded_at": "2026-06-05T10:15:00",
-                "status": "ready",
-            }
-        ]
+        assert len(documents) == 1
+        assert uuid.UUID(str(documents[0]["document_id"]))
+        assert documents[0]["filename"] == "networking.md"
+        assert documents[0]["uploaded_at"] == "2026-06-05T10:15:00"
+        assert documents[0]["status"] == "ready"
         assert len(store.calls) == 1
 
     def test_raw_document_list_without_auth_rejected(
         self,
-        server_with_document_store: tuple[str, int, _FakeDocumentStore],
+        server_with_document_store: tuple[
+            str, int, _FakeDocumentStore, _FakeVectorStore
+        ],
     ) -> None:
-        host, port, _store = server_with_document_store
+        host, port, _store, _vector_store = server_with_document_store
 
         reply = _raw_send(host, port, {"type": "documents"})
 
         assert reply == {"type": "error", "message": "not authenticated"}
+
+
+# Document deletion
+
+
+class TestDocumentDeletion:
+    def test_raw_delete_without_auth_rejected(
+        self,
+        server_with_document_store: tuple[
+            str, int, _FakeDocumentStore, _FakeVectorStore
+        ],
+    ) -> None:
+        host, port, _store, _vector_store = server_with_document_store
+
+        reply = _raw_send(host, port, {"type": "delete_document", "doc_id": "doc-1"})
+
+        assert reply == {"type": "error", "message": "not authenticated"}
+
+    def test_authenticated_user_deletes_own_document_and_chunks(
+        self,
+        server_with_document_store: tuple[
+            str, int, _FakeDocumentStore, _FakeVectorStore
+        ],
+    ) -> None:
+        host, port, store, vector_store = server_with_document_store
+
+        with _authed_client(host, port, "alice") as client:
+            documents = client.list_documents()
+            doc_id = str(documents[0]["document_id"])
+
+            reply = client.delete_document(doc_id)
+            remaining = client.list_documents()
+
+        assert reply == {"type": "delete_ok", "doc_id": doc_id, "deleted_chunks": 2}
+        assert remaining == []
+        assert store.delete_calls[-1][1] == doc_id
+        assert vector_store.delete_calls[-1][0] == doc_id
+
+    def test_user_cannot_delete_another_users_document(
+        self,
+        server_with_document_store: tuple[
+            str, int, _FakeDocumentStore, _FakeVectorStore
+        ],
+    ) -> None:
+        host, port, store, vector_store = server_with_document_store
+
+        with _authed_client(host, port, "alice") as alice:
+            alice_doc_id = str(alice.list_documents()[0]["document_id"])
+            alice_user_id = store.calls[-1]
+
+        with _authed_client(host, port, "bob") as bob:
+            with pytest.raises(AIClientError, match="document not found"):
+                bob.delete_document(alice_doc_id)
+
+        assert store.delete_calls[-1][1] == alice_doc_id
+        assert vector_store.delete_calls[-1] == (alice_doc_id, store.delete_calls[-1][0])
+
+        alice_docs = store.list_by_user(alice_user_id)
+        assert alice_docs[0]["document_id"] == alice_doc_id
 
 
 # Upload — happy path

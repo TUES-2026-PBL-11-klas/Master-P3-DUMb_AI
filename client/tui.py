@@ -93,9 +93,7 @@ def fetch_ai_response(text: str) -> AnswerResponse:
         return answer
     except AIClientError as exc:
         state["ai_status"] = f"error: {exc}"
-        return AnswerResponse(
-            answer=f"[server error] {exc}"
-        )
+        return AnswerResponse(answer=f"[server error] {exc}")
 
 
 def format_source(source: AnswerSource, index: int) -> str:
@@ -254,6 +252,56 @@ def upload_file_to_server(path: str) -> tuple[bool, str]:
         )
     detail = f"{size} bytes" if chunks is None else f"{size} bytes, {chunks} chunks"
     return True, f"'{name}' uploaded ({detail})"
+
+
+def _remove_local_document(doc: dict[str, Any]) -> None:
+    """Drop *doc* from the in-memory documents list (by id, else by identity)."""
+    docs = state["documents"]
+    doc_id = doc.get("id")
+    if doc_id:
+        state["documents"] = [d for d in docs if d.get("id") != doc_id]
+    else:
+        state["documents"] = [d for d in docs if d is not doc]
+
+
+def delete_document_on_server(doc: dict[str, Any]) -> tuple[bool, str]:
+    """
+    Delete *doc* from the server (metadata + chunks), then refresh the list.
+
+    Returns (ok, message). Offline, or for a document with no server id
+    (e.g. one added during an --offline session), it just drops the entry
+    locally so the UI stays consistent.
+    """
+    name = doc.get("name") or "document"
+    client = state.get("ai_client")
+    doc_id = doc.get("id")
+
+    if client is None:
+        _remove_local_document(doc)
+        return True, f"'{name}' removed (offline -- not sent to server)"
+
+    if not doc_id:
+        _remove_local_document(doc)
+        return True, f"'{name}' removed locally (no server id)"
+
+    try:
+        reply = client.delete_document(doc_id)
+    except AIClientError as exc:
+        state["ai_status"] = f"error: {exc}"
+        return False, f"Delete failed: {exc}"
+
+    state["ai_status"] = f"online ({client.host}:{client.port})"
+    deleted_chunks = reply.get("deleted_chunks")
+
+    # Reflect the server's new truth; fall back to a local drop if the
+    # refresh round-trip fails for any reason.
+    refreshed, _ = refresh_documents_from_server()
+    if not refreshed:
+        _remove_local_document(doc)
+
+    if deleted_chunks:
+        return True, f"'{name}' deleted from server ({deleted_chunks} chunks removed)"
+    return True, f"'{name}' deleted from server"
 
 
 # ── Color pair IDs ───────────────────────────────────────────────────────────
@@ -751,12 +799,16 @@ def screen_documents(stdscr: curses.window) -> None:
     msg = ""
     msg_attr = C_SUCCESS
     selected = 0
+    pending_delete_key: str | None = None
 
     while True:
         stdscr.clear()
         h, w = stdscr.getmaxyx()
         draw_header(stdscr, "Document Manager")
-        draw_footer(stdscr, ["U upload", "D delete", "B back", "Up/Down navigate"])
+        draw_footer(
+            stdscr,
+            ["U upload", "D delete (press twice)", "B back", "Up/Down navigate"],
+        )
 
         safe_addstr(
             stdscr,
@@ -807,9 +859,12 @@ def screen_documents(stdscr: curses.window) -> None:
 
         if ch == curses.KEY_UP and docs:
             selected = max(0, selected - 1)
+            pending_delete_key = None
         elif ch == curses.KEY_DOWN and docs:
             selected = min(len(docs) - 1, selected + 1)
+            pending_delete_key = None
         elif c == "u":
+            pending_delete_key = None
             safe_addstr(stdscr, h - 6, 2, " " * (w - 4))
             safe_addstr(
                 stdscr, h - 6, 2, "File path to upload:", curses.color_pair(C_ACCENT)
@@ -840,10 +895,18 @@ def screen_documents(stdscr: curses.window) -> None:
                 msg = ""
                 msg_attr = C_SUCCESS
         elif c == "d" and docs:
-            removed = docs.pop(selected)
-            selected = max(0, selected - 1)
-            msg = f"'{removed['name']}' removed (local only)"
-            msg_attr = C_SUCCESS
+            doc_to_delete = docs[selected]
+            doc_key = str(doc_to_delete.get("id") or f"local:{selected}")
+            if pending_delete_key != doc_key:
+                pending_delete_key = doc_key
+                msg = f"Press D again to permanently delete '{doc_to_delete['name']}'"
+                msg_attr = C_ERROR
+            else:
+                ok, msg = delete_document_on_server(doc_to_delete)
+                msg_attr = C_SUCCESS if ok else C_ERROR
+                pending_delete_key = None
+                if ok:
+                    selected = max(0, min(selected, len(state["documents"]) - 1))
         elif c == "b":
             break
 
